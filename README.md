@@ -1,6 +1,16 @@
-# Terminal Runner MCP Server
+# TermCast MCP
 
-A Go MCP stdio server that executes local programs, records JSONL sessions, and replays them into separate logs.
+[![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](go.mod)
+[![Release](https://img.shields.io/github/v/release/cmdlinezero/mcp-term?include_prereleases)](https://github.com/cmdlinezero/mcp-term/releases)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**Record once. Replay anywhere.**
+
+TermCast MCP is a Go Model Context Protocol (MCP) stdio terminal server. Its `mcp-term` executable runs commands, captures stdout, stderr, exit status and duration in append-only JSONL, and supports both command re-execution and read-only asciinema-compatible playback export.
+
+> The release badge reflects published GitHub releases when available. A CI badge can be added once a GitHub Actions workflow exists.
+
+**Repository:** https://github.com/cmdlinezero/mcp-term
 
 ## Requirements
 
@@ -15,6 +25,21 @@ go test ./...
 go build -o mcp-term .
 ```
 
+## Architecture
+
+```text
+MCP client (e.g. DejaVu)
+        | JSON-RPC over stdio
+        v
+   mcp-term serve
+        | run_command
+        v
+   Command execution --> session.jsonl
+                             |         |
+                             |         +--> export-asciinema --> session.cast --> asciinema play
+                             +--> replay (re-executes commands)
+```
+
 ## Usage
 
 ```sh
@@ -24,6 +49,16 @@ git diff --no-index session.jsonl replay-session.jsonl || true
 ```
 
 The replay output must not exist already. Each replayed command receives a fresh execution ID and timestamp, so raw logs will differ even if command output matches. For meaningful comparisons, normalize the `id`, `timestamp`, and `duration` fields first.
+
+## Recording format
+
+Each JSONL line is a separate execution record. For example:
+
+```json
+{"id":"04e824b195011ad7","timestamp":"2026-11-12T10:49:11.675009Z","command":"go","args":["version"],"stdout":"go version go1.26.7 darwin/arm64\n","stderr":"","exit_code":0,"duration":"43.408ms"}
+```
+
+Execution IDs are generated for each run, including repeated identical commands. A Markdown lab or other client can reference an existing record using its JSONL filename and `id`; the read-only exporter does not depend on the source of the recording.
 
 ## MCP client configuration
 
@@ -75,4 +110,14 @@ streams and command-level timestamps. The export does not run commands.
 `mcp-term replay` is a different, potentially side-effecting operation: it
 **re-executes** recorded commands. Only use it with trusted, safe recordings.
 
-Run regression tests with `go test ./...`, `go test -race ./...`, and `go vet ./...`.
+## Testing
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+```
+
+## License
+
+TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
