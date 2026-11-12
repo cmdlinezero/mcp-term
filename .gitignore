@@ -1,0 +1,15 @@
+# Executables
+mcp-term
+
+*.test
+*.patch
+
+# JSONL
+session.jsonl
+replay-session.jsonl
+
+
+# Archives
+*.tar
+*.tar.gz
+*.zip
