@@ -1,0 +1,22 @@
+# The branch trigger is configured in Google Cloud Build, not in this file.
+# Steps run sequentially; no tags or releases are created by this build.
+steps:
+  - id: test
+    name: golang:1.23
+    entrypoint: sh
+    args: ['-c', 'go test ./...']
+
+  - id: race
+    name: golang:1.23
+    entrypoint: sh
+    args: ['-c', 'go test -race ./...']
+
+  - id: vet
+    name: golang:1.23
+    entrypoint: sh
+    args: ['-c', 'go vet ./...']
+
+  - id: build
+    name: golang:1.23
+    entrypoint: sh
+    args: ['-c', 'go build -o /workspace/mcp-term .']

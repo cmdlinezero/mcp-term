@@ -1,14 +1,11 @@
 # TermCast MCP
 
 [![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](go.mod)
-[![Release](https://img.shields.io/github/v/release/cmdlinezero/mcp-term?include_prereleases)](https://github.com/cmdlinezero/mcp-term/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Record once. Replay anywhere.**
 
 TermCast MCP is a Go Model Context Protocol (MCP) stdio terminal server. Its `mcp-term` executable runs commands, captures stdout, stderr, exit status and duration in append-only JSONL, and supports both command re-execution and read-only asciinema-compatible playback export.
-
-> The release badge reflects published GitHub releases when available. A CI badge can be added once a GitHub Actions workflow exists.
 
 **Repository:** https://github.com/cmdlinezero/mcp-term
 
@@ -118,6 +115,120 @@ go test -race ./...
 go vet ./...
 ```
 
+## Google Cloud Build and releases (CHANGE-006)
+
+The repository uses a Google Cloud Build trigger for commits to `main`, not
+GitHub Actions. Configure the existing trigger in Google Cloud to use the
+repository's `cloudbuild.yaml` (configuration type: Cloud Build configuration
+file). The trigger itself, its branch filter and service account are managed
+in Google Cloud, not in this repository.
+
+Cloud Build runs `go test ./...`, `go test -race ./...`, `go vet ./...`, and
+`go build` sequentially using Go 1.23, matching `go.mod`. It requires access
+to download the Go module dependencies; the compiled binary is a temporary
+build output, not a published artifact. The build must pass before a release
+is tagged. Local verification remains:
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
+```
+
+The Go module is `github.com/cmdlinezero/mcp-term`. The initial intended
+version is `v0.1.0`; **do not create the tag until the CHANGE-006 commit is
+pushed to `main` and its Cloud Build succeeds**. From a clean checkout of the
+verified commit:
+
+```sh
+git switch main
+git pull --ff-only
+git status --short
+git log -1 --oneline
+# Confirm the commit above is the commit that passed Cloud Build.
+git tag -a v0.1.0 -m "TermCast MCP v0.1.0 — initial release (CHANGE-005A through CHANGE-006)"
+git push origin v0.1.0
+```
+
+Tags are annotated and pushed manually; Cloud Build does not tag or publish
+releases. Do not reuse or move a published version tag.
+
 ## License
 
 TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
+
+## Markdown lab ingestion (CHANGE-005B)
+
+`lab-import` is an optional adapter for Hugo-style Markdown labs. It finds
+`bash`/`sh` fences with `terminal=true` (including those inside `{{< step >}}`
+shortcodes), leaves other Markdown unchanged, and replaces legacy `cmd-id`
+attributes with real `command-id` values from JSONL execution records.
+
+**Execute and record (default):**
+
+```sh
+./mcp-term lab-import --input import-export.md --log docker-lab.jsonl
+```
+
+The importer executes each `terminal=true` `bash`/`sh` fence in document order
+through the canonical executor and writes a **new** JSONL recording. It records
+stdout, stderr, exit status, duration and execution ID, including failures.
+Nonzero exits do not prevent subsequent fences from running; after recording all
+commands, the CLI returns an error if any command exited nonzero. The JSONL
+output must not already exist; use a fresh path for each run.
+
+**Also generate bound Markdown (optional):**
+
+```sh
+./mcp-term lab-import --input import-export.md --log docker-lab.jsonl \
+  --output import-export-bound.md
+```
+
+The original Markdown is never modified. The generated copy updates only
+terminal fence opening lines to reference the new JSONL IDs; the output file
+must not already exist.
+
+**Bind existing recordings without execution (optional):**
+
+```sh
+./mcp-term lab-import --input import-export.md --log docker-lab.jsonl \
+  --output import-export-bound.md --bind-only
+```
+
+This matches commands **in order** against existing recordings, failing if a
+match is absent. `--bind-only` requires `--output` and never executes commands.
+
+Execution uses `sh -c` for each terminal fence to support pipes, redirects,
+and shell quoting. This is **not sandboxed**: scripts run with the current
+process permissions and can modify files, access secrets or delete resources.
+Review the lab and use an appropriate disposable test environment. Markdown
+is an optional adapter; direct MCP tool calls remain supported.
+
+The generated Markdown contains references such as:
+
+````markdown
+```bash {terminal=true copy=true file-id="session.jsonl" command-id="04e824b195011ad7"}
+go version
+```
+````
+
+`file-id` is the JSONL filename, not a stable lab ID. `command-id` is the
+actual JSONL record `id`, not the old `cmd-id`. Keep the referenced JSONL file
+available to the Markdown renderer. The importer does not implement a renderer.
+
+### Automated end-to-end regression (CHANGE-005C)
+
+`go test ./...` includes CLI-level integration tests for Markdown command
+execution, JSONL recording integrity, bound Markdown references, read-only
+binding, asciicast v2 export, nonzero exit handling and overwrite protection.
+The tests run short POSIX shell commands in temporary directories; no Docker
+daemon or network access is required. On systems without `/bin/sh`, the
+shell-dependent tests skip.
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
+```
