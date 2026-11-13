@@ -180,3 +180,19 @@ go version
 `file-id` is the JSONL filename, not a stable lab ID. `command-id` is the
 actual JSONL record `id`, not the old `cmd-id`. Keep the referenced JSONL file
 available to the Markdown renderer. The importer does not implement a renderer.
+
+### Automated end-to-end regression (CHANGE-005C)
+
+`go test ./...` includes CLI-level integration tests for Markdown command
+execution, JSONL recording integrity, bound Markdown references, read-only
+binding, asciicast v2 export, nonzero exit handling and overwrite protection.
+The tests run short POSIX shell commands in temporary directories; no Docker
+daemon or network access is required. On systems without `/bin/sh`, the
+shell-dependent tests skip.
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
+```

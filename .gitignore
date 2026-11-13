@@ -1,5 +1,6 @@
 # Executables
 mcp-term
+.DS_Store
 
 *.test
 *.patch
