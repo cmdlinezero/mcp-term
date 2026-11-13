@@ -1,4 +1,4 @@
-module github.com/example/mcp-term
+module github.com/cmdlinezero/mcp-term
 
 go 1.23
 

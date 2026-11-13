@@ -1,14 +1,11 @@
 # TermCast MCP
 
 [![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](go.mod)
-[![Release](https://img.shields.io/github/v/release/cmdlinezero/mcp-term?include_prereleases)](https://github.com/cmdlinezero/mcp-term/releases)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 **Record once. Replay anywhere.**
 
 TermCast MCP is a Go Model Context Protocol (MCP) stdio terminal server. Its `mcp-term` executable runs commands, captures stdout, stderr, exit status and duration in append-only JSONL, and supports both command re-execution and read-only asciinema-compatible playback export.
-
-> The release badge reflects published GitHub releases when available. A CI badge can be added once a GitHub Actions workflow exists.
 
 **Repository:** https://github.com/cmdlinezero/mcp-term
 
@@ -117,6 +114,45 @@ go test ./...
 go test -race ./...
 go vet ./...
 ```
+
+## Google Cloud Build and releases (CHANGE-006)
+
+The repository uses a Google Cloud Build trigger for commits to `main`, not
+GitHub Actions. Configure the existing trigger in Google Cloud to use the
+repository's `cloudbuild.yaml` (configuration type: Cloud Build configuration
+file). The trigger itself, its branch filter and service account are managed
+in Google Cloud, not in this repository.
+
+Cloud Build runs `go test ./...`, `go test -race ./...`, `go vet ./...`, and
+`go build` sequentially using Go 1.23, matching `go.mod`. It requires access
+to download the Go module dependencies; the compiled binary is a temporary
+build output, not a published artifact. The build must pass before a release
+is tagged. Local verification remains:
+
+```sh
+go test ./...
+go test -race ./...
+go vet ./...
+git diff --check
+```
+
+The Go module is `github.com/cmdlinezero/mcp-term`. The initial intended
+version is `v0.1.0`; **do not create the tag until the CHANGE-006 commit is
+pushed to `main` and its Cloud Build succeeds**. From a clean checkout of the
+verified commit:
+
+```sh
+git switch main
+git pull --ff-only
+git status --short
+git log -1 --oneline
+# Confirm the commit above is the commit that passed Cloud Build.
+git tag -a v0.1.0 -m "TermCast MCP v0.1.0 — initial release (CHANGE-005A through CHANGE-006)"
+git push origin v0.1.0
+```
+
+Tags are annotated and pushed manually; Cloud Build does not tag or publish
+releases. Do not reuse or move a published version tag.
 
 ## License
 

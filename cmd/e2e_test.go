@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/example/mcp-term/internal"
+	"github.com/cmdlinezero/mcp-term/internal"
 )
 
 const tutorialFixture = `---

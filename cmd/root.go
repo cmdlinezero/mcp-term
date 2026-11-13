@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/example/mcp-term/internal"
+	"github.com/cmdlinezero/mcp-term/internal"
 	"github.com/spf13/cobra"
 )
 
