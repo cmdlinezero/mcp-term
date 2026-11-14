@@ -1,5 +1,19 @@
 # TermCast MCP
 
+[![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](go.mod)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
+**Record once. Replay anywhere.**
+
+TermCast MCP is a Go Model Context Protocol (MCP) stdio terminal server. Its `mcp-term` executable runs commands, captures stdout, stderr, exit status and duration in append-only JSONL, and supports both command re-execution and read-only asciinema-compatible playback export.
+
+**Repository:** https://github.com/cmdlinezero/mcp-term
+
+## Requirements
+
+- Go 1.23+
+- Network access once to download `github.com/spf13/cobra` (and its dependencies)
+
 ## Recording, binding, and walkthrough file flow
 
 **Binding requires a populated JSONL recording.** Its records must contain the
@@ -85,21 +99,6 @@ The bound Markdown preserves the instructional text and adds `command-id` and
 when editing: the exporter rejects mismatches. Missing or out-of-order
 recordings produce binding errors rather than silently executing commands.
 Output files must not already exist.
-
-
-[![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](go.mod)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-
-**Record once. Replay anywhere.**
-
-TermCast MCP is a Go Model Context Protocol (MCP) stdio terminal server. Its `mcp-term` executable runs commands, captures stdout, stderr, exit status and duration in append-only JSONL, and supports both command re-execution and read-only asciinema-compatible playback export.
-
-**Repository:** https://github.com/cmdlinezero/mcp-term
-
-## Requirements
-
-- Go 1.23+
-- Network access once to download `github.com/spf13/cobra` (and its dependencies)
 
 ## Build and test
 
@@ -241,10 +240,6 @@ git push origin v0.1.0
 Tags are annotated and pushed manually; Cloud Build does not tag or publish
 releases. Do not reuse or move a published version tag.
 
-## License
-
-TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
-
 ## Markdown lab ingestion (CHANGE-005B)
 
 `lab-import` is an optional adapter for Hugo-style Markdown labs. It finds
@@ -345,3 +340,9 @@ Markdown renderer. The cast is read-only; no commands are executed. Output is
 created exclusively and existing files are never overwritten.
 
 Exit-code markers are omitted from both raw and lab-aware casts by default. Use `--show-exit-code` with `export-asciinema` to display them when demonstrating failures.
+
+## License
+
+TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
+
+
