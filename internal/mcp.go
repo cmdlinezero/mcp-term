@@ -31,6 +31,10 @@ type runParams struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
+type bindArgs struct {
+	Markdown string `json:"markdown"`
+	Log      string `json:"log"`
+}
 type runArgs struct {
 	Command string   `json:"command"`
 	Args    []string `json:"args"`
@@ -75,11 +79,40 @@ func Serve(ctx context.Context, in io.Reader, out io.Writer, logger *Logger) err
 		case "ping":
 			r.Result = map[string]any{}
 		case "tools/list":
-			r.Result = map[string]any{"tools": []any{map[string]any{"name": "run_command", "description": "Execute a local program directly, record stdout, stderr, exit code and duration. Commands are NOT sandboxed.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Executable name or path"}, "args": map[string]any{"type": "array", "items": map[string]string{"type": "string"}}}, "required": []string{"command"}, "additionalProperties": false}}}}
+			r.Result = map[string]any{"tools": []any{map[string]any{"name": "bind_lab", "description": "Bind Markdown terminal fences to existing JSONL without executing commands or writing files.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"markdown": map[string]any{"type": "string"}, "log": map[string]any{"type": "string"}}, "required": []string{"markdown", "log"}, "additionalProperties": false}}, map[string]any{"name": "run_command", "description": "Execute a local program directly, record stdout, stderr, exit code and duration. Commands are NOT sandboxed.", "inputSchema": map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string", "description": "Executable name or path"}, "args": map[string]any{"type": "array", "items": map[string]string{"type": "string"}}}, "required": []string{"command"}, "additionalProperties": false}}}}
 		case "tools/call":
 			var p runParams
-			if err := json.Unmarshal(req.Params, &p); err != nil || p.Name != "run_command" {
+			if err := json.Unmarshal(req.Params, &p); err != nil || (p.Name != "run_command" && p.Name != "bind_lab") {
 				r.Error = &rpcError{-32602, "Invalid tool name or parameters"}
+				break
+			}
+			if p.Name == "bind_lab" {
+				var a bindArgs
+				if err := json.Unmarshal(p.Arguments, &a); err != nil || a.Markdown == "" || strings.TrimSpace(a.Log) == "" {
+					r.Error = &rpcError{-32602, "markdown and log are required"}
+					break
+				}
+				commands, err := ParseLab([]byte(a.Markdown))
+				if err == nil && len(commands) == 0 {
+					err = fmt.Errorf("no terminal=true bash/sh fences found")
+				}
+				var entries []CommandLog
+				if err == nil {
+					entries, err = ReadLogs(a.Log)
+				}
+				var matched []CommandLog
+				if err == nil {
+					matched, err = BindLab(commands, entries)
+				}
+				var bound []byte
+				if err == nil {
+					bound, err = RewriteLab([]byte(a.Markdown), commands, matched, a.Log)
+				}
+				if err != nil {
+					r.Result = map[string]any{"content": []any{map[string]string{"type": "text", "text": err.Error()}}, "isError": true}
+				} else {
+					r.Result = map[string]any{"content": []any{map[string]string{"type": "text", "text": string(bound)}}, "isError": false}
+				}
 				break
 			}
 			var a runArgs
