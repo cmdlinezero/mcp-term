@@ -67,7 +67,8 @@ func newRoot() *cobra.Command {
 	}}
 	replay.Flags().StringVarP(&input, "log", "l", "session.jsonl", "Source session log")
 	replay.Flags().StringVarP(&output, "output", "o", "replay-session.jsonl", "New replay log (must not exist)")
-	var exportLog, exportOutput string
+	var exportLog, exportOutput, exportLab string
+	var exportShowExitCode bool
 	export := &cobra.Command{Use: "export-asciinema", Short: "Export recorded JSONL to asciicast v2 without executing commands", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
 		a, err := filepath.Abs(exportLog)
 		if err != nil {
@@ -80,8 +81,13 @@ func newRoot() *cobra.Command {
 		if a == b {
 			return fmt.Errorf("input and output must differ")
 		}
-		return internal.ExportAsciicast(a, b)
+		if exportLab != "" {
+			return internal.ExportWalkthroughCast(exportLab, a, b, exportShowExitCode)
+		}
+		return internal.ExportAsciicast(a, b, exportShowExitCode)
 	}}
+	export.Flags().StringVar(&exportLab, "lab", "", "Bound Markdown lab for annotated walkthrough export")
+	export.Flags().BoolVar(&exportShowExitCode, "show-exit-code", false, "Display [exit N] markers in the cast (hidden by default)")
 	export.Flags().StringVar(&exportLog, "log", "session.jsonl", "Source JSONL recording")
 	export.Flags().StringVar(&exportOutput, "output", "session.cast", "New asciicast v2 output file")
 	var labInput, labOutput, labLog string

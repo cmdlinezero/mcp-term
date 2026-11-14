@@ -34,7 +34,7 @@ func TestAsciicastV2(t *testing.T) {
 	e.Stderr = "warning\n"
 	e.ExitCode = 42
 	var b bytes.Buffer
-	if err := WriteAsciicastV2(&b, []CommandLog{e}); err != nil {
+	if err := WriteAsciicastV2(&b, []CommandLog{e}, true); err != nil {
 		t.Fatal(err)
 	}
 	lines := strings.Split(strings.TrimSpace(b.String()), "\n")
@@ -107,5 +107,22 @@ func TestCorruptJSONL(t *testing.T) {
 	}
 	if _, err := ReadLogs(path); err == nil || !strings.Contains(err.Error(), "line 1") {
 		t.Fatalf("expected line-numbered error: %v", err)
+	}
+}
+
+func TestAsciicastExitCodesHiddenByDefault(t *testing.T) {
+	e := sampleCastRecord()
+	e.ExitCode = 17
+	for _, show := range []bool{false, true} {
+		var b bytes.Buffer
+		if err := WriteAsciicastV2(&b, []CommandLog{e}, show); err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Contains(b.String(), "[exit 17]"); got != show {
+			t.Fatalf("show=%v: unexpected exit marker: %s", show, b.String())
+		}
+		if !strings.Contains(b.String(), "go version") {
+			t.Fatal("recorded output missing")
+		}
 	}
 }

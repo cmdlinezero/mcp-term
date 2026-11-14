@@ -232,3 +232,29 @@ go test -race ./...
 go vet ./...
 git diff --check
 ```
+
+## Markdown-authored walkthrough export (CHANGE-007)
+
+Use a bound Markdown lab as the **presentation source** and an existing JSONL
+recording as the **execution-result source**:
+
+```sh
+./mcp-term export-asciinema --lab test/import-export-bound.md --log docker-lab.jsonl --output docker-lab-demo.cast
+asciinema play docker-lab-demo.cast
+```
+
+The `--lab` option is optional. Without it, the original JSONL-only cast export
+is unchanged. With it, Markdown step labels, headings, paragraphs, and list
+instructions appear before their associated recorded commands. The exporter
+uses each terminal fence's existing `file-id` and `command-id` attributes to
+resolve output from the JSONL; command order follows the Markdown, not the log.
+Authors may change narration, reorder or omit bound commands, and add notes
+without re-executing the lab. The command text inside a bound fence must still
+match the recorded command; mismatches fail rather than misrepresent execution.
+
+Nonterminal fenced blocks (such as Mermaid and hints), Hugo shortcodes, and YAML
+front matter are omitted. This is a plain-terminal interpretation, not a full
+Markdown renderer. The cast is read-only; no commands are executed. Output is
+created exclusively and existing files are never overwritten.
+
+Exit-code markers are omitted from both raw and lab-aware casts by default. Use `--show-exit-code` with `export-asciinema` to display them when demonstrating failures.

@@ -34,7 +34,7 @@ func FindLogByID(entries []CommandLog, id string) (CommandLog, error) {
 
 // WriteAsciicastV2 converts previously recorded outcomes into a read-only terminal cast.
 // Command-level timestamps are available; stdout/stderr chunk timing and interleaving are not.
-func WriteAsciicastV2(w io.Writer, entries []CommandLog) error {
+func WriteAsciicastV2(w io.Writer, entries []CommandLog, showExitCode ...bool) error {
 	bw := bufio.NewWriter(w)
 	header := map[string]any{"version": 2, "width": 100, "height": 30, "timestamp": int64(0), "env": map[string]string{"TERM": "xterm-256color"}}
 	if len(entries) > 0 {
@@ -86,8 +86,10 @@ func WriteAsciicastV2(w io.Writer, entries []CommandLog) error {
 			}
 		}
 		elapsed += 0.03
-		if err := writeCastJSON(bw, []any{elapsed, "o", fmt.Sprintf("\r\n[exit %d]\r\n", e.ExitCode)}); err != nil {
-			return err
+		if len(showExitCode) > 0 && showExitCode[0] {
+			if err := writeCastJSON(bw, []any{elapsed, "o", fmt.Sprintf("\r\n[exit %d]\r\n", e.ExitCode)}); err != nil {
+				return err
+			}
 		}
 	}
 	return bw.Flush()
@@ -113,7 +115,7 @@ func shellQuote(s string) string {
 }
 
 // ExportAsciicast reads a JSONL file and creates a new cast file without running commands.
-func ExportAsciicast(input, output string) error {
+func ExportAsciicast(input, output string, showExitCode ...bool) error {
 	if input == output {
 		return fmt.Errorf("input and output must differ")
 	}
@@ -129,7 +131,7 @@ func ExportAsciicast(input, output string) error {
 		return err
 	}
 	defer f.Close()
-	if err := WriteAsciicastV2(f, entries); err != nil {
+	if err := WriteAsciicastV2(f, entries, showExitCode...); err != nil {
 		_ = os.Remove(output)
 		return err
 	}
