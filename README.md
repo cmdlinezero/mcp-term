@@ -1,5 +1,92 @@
 # TermCast MCP
 
+## Recording, binding, and walkthrough file flow
+
+**Binding requires a populated JSONL recording.** Its records must contain the
+terminal commands referenced in the source Markdown, in matching order. An
+empty or unrelated JSONL file cannot be bound. Binding and cast export never
+execute commands; generating a new recording **does execute** the lab.
+
+| Artifact | Source | Purpose |
+| --- | --- | --- |
+| `import-export.md` | Author | Original Markdown lab with `terminal=true` blocks |
+| `docker-lab.jsonl` | `mcp-term` execution / `lab-import` | Command results and execution IDs |
+| `import-export-bound.md` | `dejavu bind` via MCP `bind_lab`, or `mcp-term lab-import --bind-only` | Author-editable Markdown referencing JSONL records |
+| `import-export.cast` | `mcp-term export-asciinema` | Read-only narrated terminal walkthrough |
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Author
+    participant MD as Markdown lab
+    participant MT as mcp-term
+    participant LOG as JSONL recording
+    participant DV as DejaVu
+    participant BMD as Bound Markdown
+    participant CAST as Asciicast
+    Author->>MD: Author terminal commands and explanations
+    alt No compatible JSONL recording
+        Author->>MT: lab-import --input lab.md --log recording.jsonl
+        MT->>MD: Read terminal blocks
+        Note over MT: Execute commands (may have side effects)
+        MT->>LOG: Write execution results and IDs
+    else Compatible JSONL already exists
+        Note over LOG: Reuse recording without execution
+    end
+    Author->>DV: bind --input lab.md --log recording.jsonl --output bound.md
+    DV->>MT: MCP bind_lab
+    MT->>LOG: Match commands in recording order
+    alt Command missing or out of order
+        MT-->>DV: Error with Markdown line number
+        DV-->>Author: Correct input or generate compatible recording
+    else All terminal commands match
+        MT-->>DV: Bound Markdown
+        DV->>BMD: Write bound.md
+        Author->>BMD: Edit walkthrough narration
+        Author->>MT: export-asciinema --lab bound.md --log recording.jsonl
+        MT->>LOG: Read recorded results (no execution)
+        MT->>CAST: Write guided playback
+    end
+```
+
+If the recording is missing, generate it in a trusted environment:
+
+```sh
+/absolute/path/to/mcp-term lab-import \
+  --input test/import-export.md \
+  --log /absolute/path/to/docker-lab.jsonl
+```
+
+**Caution:** `lab-import` executes commands and may have side effects. Review
+the lab first. Use a new output filename for a new recording.
+
+Bind the existing recording through DejaVu (read-only):
+
+```sh
+dejavu bind \
+  --mcp-term /absolute/path/to/mcp-term \
+  --input test/import-export.md \
+  --log /absolute/path/to/docker-lab.jsonl \
+  --output test/import-export-bound.md
+```
+
+Then edit the bound Markdown's narration and export a read-only walkthrough:
+
+```sh
+/absolute/path/to/mcp-term export-asciinema \
+  --lab test/import-export-bound.md \
+  --log /absolute/path/to/docker-lab.jsonl \
+  --output import-export.cast
+asciinema play import-export.cast
+```
+
+The bound Markdown preserves the instructional text and adds `command-id` and
+`file-id` references to terminal blocks. Preserve the recorded command text
+when editing: the exporter rejects mismatches. Missing or out-of-order
+recordings produce binding errors rather than silently executing commands.
+Output files must not already exist.
+
+
 [![Go](https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go)](go.mod)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
