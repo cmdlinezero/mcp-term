@@ -15,6 +15,9 @@ import (
 type WalkthroughItem struct {
 	Text   string
 	Record *CommandLog
+	Pause  time.Duration
+	Clear  bool
+	Typing time.Duration
 }
 
 var (
@@ -22,6 +25,7 @@ var (
 	boundFile      = regexp.MustCompile(`(?:^|\s)file-id="([^"]+)"`)
 	markdownLink   = regexp.MustCompile(`\[([^]]+)\]\([^)]+\)`)
 	markdownInline = regexp.MustCompile("[`*_]")
+	typingAttr     = regexp.MustCompile(`(?:^|\s)typing=([^\s}]+)`)
 	listPrefix     = regexp.MustCompile(`^\s*(?:[-*+]\s+|[0-9]+\.\s+)`)
 )
 
@@ -87,7 +91,15 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 				}
 				used[id[1]] = true
 				copyRecord := e
-				items = append(items, WalkthroughItem{Record: &copyRecord})
+				var typing time.Duration
+				if attr := typingAttr.FindStringSubmatch(m[2]); attr != nil {
+					parsed, err := parsePresentationDuration(attr[1], startLine, "typing")
+					typing = parsed
+					if err != nil {
+						return nil, err
+					}
+				}
+				items = append(items, WalkthroughItem{Record: &copyRecord, Typing: typing})
 				continue
 			}
 			script = append(script, line)
@@ -96,6 +108,22 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 		if match := stepStart.FindStringSubmatch(line); match != nil {
 			items = append(items, WalkthroughItem{Text: "\n=== " + match[1] + " ===\n"})
 			continue
+		}
+		if strings.HasPrefix(trim, "<!-- termcast:") {
+			if trim == "<!-- termcast:clear -->" {
+				items = append(items, WalkthroughItem{Clear: true})
+				continue
+			}
+			if strings.HasPrefix(trim, "<!-- termcast:pause ") && strings.HasSuffix(trim, " -->") {
+				durationText := strings.TrimSuffix(strings.TrimPrefix(trim, "<!-- termcast:pause "), " -->")
+				duration, err := parsePresentationDuration(durationText, i+1, "pause")
+				if err != nil {
+					return nil, err
+				}
+				items = append(items, WalkthroughItem{Pause: duration})
+				continue
+			}
+			return nil, fmt.Errorf("line %d: invalid termcast directive %q", i+1, trim)
 		}
 		if trim == "" || strings.HasPrefix(trim, "{{<") || strings.HasPrefix(trim, "<!--") || strings.HasPrefix(trim, "-->") {
 			continue
@@ -117,6 +145,15 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 		return nil, fmt.Errorf("no bound terminal commands found")
 	}
 	return items, nil
+}
+
+// Durations are deliberately bounded to keep generated casts watchable.
+func parsePresentationDuration(value string, line int, name string) (time.Duration, error) {
+	d, err := time.ParseDuration(value)
+	if err != nil || d <= 0 || d > 30*time.Second {
+		return 0, fmt.Errorf("line %d: %s duration %q must be greater than zero and at most 30s", line, name, value)
+	}
+	return d, nil
 }
 
 // WriteWalkthroughCast writes a guided cast with authored narration and recorded
@@ -144,6 +181,16 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 		return err
 	}
 	for _, item := range items {
+		if item.Clear {
+			if err := writeCastJSON(bw, []any{elapsed, "o", "\x1b[2J\x1b[H"}); err != nil {
+				return err
+			}
+			continue
+		}
+		if item.Pause > 0 {
+			elapsed += item.Pause.Seconds()
+			continue
+		}
 		if item.Record == nil {
 			if err := emit("\r\n" + item.Text + "\r\n"); err != nil {
 				return err
@@ -151,7 +198,22 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 			continue
 		}
 		e := item.Record
-		if err := emit("\r\n$ " + recordedScript(*e) + "\r\n"); err != nil {
+		if item.Typing > 0 {
+			if err := writeCastJSON(bw, []any{elapsed, "o", "\r\n$ "}); err != nil {
+				return err
+			}
+			command := recordedScript(*e)
+			for _, r := range command {
+				if err := writeCastJSON(bw, []any{elapsed, "o", string(r)}); err != nil {
+					return err
+				}
+				elapsed += item.Typing.Seconds()
+			}
+			if err := writeCastJSON(bw, []any{elapsed, "o", "\r\n"}); err != nil {
+				return err
+			}
+			elapsed += 0.7
+		} else if err := emit("\r\n$ " + recordedScript(*e) + "\r\n"); err != nil {
 			return err
 		}
 		if e.Stdout != "" {
