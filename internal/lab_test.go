@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 const sampleLab = `---
@@ -166,5 +167,94 @@ func TestLabExecuteRecordsFailuresAndContinues(t *testing.T) {
 		if e.ID == "" || e.ID != entries[i].ID {
 			t.Fatalf("entry %d missing ID", i)
 		}
+	}
+}
+
+func TestLab009FenceStylesAndCanonicalRewrite(t *testing.T) {
+	input := "```bash terminal=true copy=true\necho hi\n```\n```sh {terminal=\"true\" file-id=\"stale\" copy=\"true\"}\nprintf ok\n```\n```go {terminal=\"true\" file=\"main.go\" copy=\"true\"}\npackage main\n```\n"
+	commands, err := ParseLab([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(commands) != 3 || commands[2].File != "main.go" {
+		t.Fatalf("commands: %#v", commands)
+	}
+	matched := []CommandLog{{ID: "a"}, {ID: "b"}, {ID: "c"}}
+	rewritten, err := RewriteLab([]byte(input), commands, matched, "record.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(rewritten)
+	for _, want := range []string{"```bash {terminal=true", "```sh {terminal=\"true\"", "```go {terminal=\"true\"", `file-id="record.jsonl" command-id="c"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("missing %q: %s", want, got)
+		}
+	}
+	if strings.Contains(got, `file-id="stale"`) {
+		t.Fatal("stale binding retained")
+	}
+}
+
+func TestLab009SourceWriteAndWorkingDirectory(t *testing.T) {
+	dir := t.TempDir()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(old) })
+	logger, err := OpenLogger(filepath.Join(dir, "records.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	commands := []LabCommand{{Script: "mkdir demo", Line: 1}, {Script: "cd demo", Line: 2}, {Script: "package main", File: "main.go", Language: "go", Line: 3}, {Script: "cat main.go", Line: 4}, {Script: "package changed", File: "main.go", Language: "go", Line: 5}}
+	records, err := ExecuteLab(context.Background(), commands, logger)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := logger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 5 || records[3].Stdout != "package main\n" || records[4].ExitCode == 0 {
+		t.Fatalf("unexpected records: %#v", records)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "demo", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "package main\n" {
+		t.Fatalf("file contents: %q", data)
+	}
+	matched, err := BindLab(commands, records)
+	if err != nil || len(matched) != 5 {
+		t.Fatalf("bind: %v", err)
+	}
+}
+
+func TestLab009RejectsMissingSourceDestination(t *testing.T) {
+	if _, err := ParseLab([]byte("```go {terminal=\"true\"}\npackage main\n```\n")); err == nil {
+		t.Fatal("expected missing destination")
+	}
+}
+
+func TestLab009SourceWalkthrough(t *testing.T) {
+	input := "```go {terminal=\"true\" file=\"main.go\"}\npackage main\n```\n"
+	commands, err := ParseLab([]byte(input))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := newLabRecord("sh", []string{"-c", sourceScript(commands[0])}, time.Now(), 0, "", "")
+	bound, err := RewriteLab([]byte(input), commands, []CommandLog{entry}, "record.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := ParseWalkthrough(bound, []CommandLog{entry}, "record.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Record == nil {
+		t.Fatalf("walkthrough items: %#v", items)
 	}
 }

@@ -76,3 +76,35 @@ func TestWalkthroughExitCodesHiddenByDefault(t *testing.T) {
 		}
 	}
 }
+
+func TestWalkthroughTypingWithThemes(t *testing.T) {
+	e := sampleCastRecord()
+	e.Command = "sh"
+	e.Args = []string{"-c", "echo hello"}
+	e.Stdout = "recorded hello\n"
+	for _, theme := range []string{"", "dracula", "monokai", "github-dark"} {
+		t.Run(theme, func(t *testing.T) {
+			lab := "```bash {terminal=\"true\" typing=\"35ms\" file-id=\"session.jsonl\" command-id=\"abc\"}\necho hello\n```\n"
+			items, err := ParseWalkthrough([]byte(lab), []CommandLog{e}, "session.jsonl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if items[0].TypingDelay.String() != "35ms" {
+				t.Fatalf("typing lost: %v", items[0].TypingDelay)
+			}
+			var b bytes.Buffer
+			if err := WriteWalkthroughCastThemed(&b, items, theme); err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(b.String(), `"echo hello\\r\\n"`) {
+				t.Fatal("command emitted in one event")
+			}
+			if !strings.Contains(b.String(), `"recorded hello`) {
+				t.Fatal("stdout missing")
+			}
+			if strings.Count(b.String(), `,"o",`) < 10 {
+				t.Fatal("not enough timed events")
+			}
+		})
+	}
+}
