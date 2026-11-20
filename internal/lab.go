@@ -2,31 +2,57 @@ package internal
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 )
 
 // LabCommand is a terminal-enabled shell fence in a Markdown lab.
 type LabCommand struct {
-	Script  string
-	Step    string
-	Line    int
-	Start   int
-	End     int
-	Opening string
+	Script    string
+	Step      string
+	Line      int
+	Start     int
+	End       int
+	Opening   string
+	Language  string
+	File      string
+	Overwrite bool
 }
 
 var (
-	fenceStart   = regexp.MustCompile("^([ \\t]*)```(?:bash|sh)[ \\t]*\\{([^}\\r\\n]*)\\}[ \\t]*\\r?\\n?$")
-	fenceEnd     = regexp.MustCompile("^[ \\t]*```[ \\t]*\\r?\\n?$")
-	stepStart    = regexp.MustCompile(`\{\{<\s*step\s+[^>]*label="([^"]+)"`)
-	terminalAttr = regexp.MustCompile(`(?:^|\s)terminal=true(?:\s|$)`)
-	fileAttr     = regexp.MustCompile(`(?:^|\s)file-id="[^"]*"`)
-	commandAttr  = regexp.MustCompile(`(?:^|\s)(?:cmd-id|command-id)="[^"]*"`)
+	fenceStart    = regexp.MustCompile("^([ \t]*)```(bash|sh|[A-Za-z][A-Za-z0-9_+.-]*)[ \t]*(?:\\{([^}\\r\\n]*)\\}|([^\\r\\n]*))[ \t]*\\r?\\n?$")
+	fenceEnd      = regexp.MustCompile("^[ \t]*```[ \t]*\\r?\\n?$")
+	stepStart     = regexp.MustCompile(`\{\{<\s*step\s+[^>]*label="([^"]+)"`)
+	terminalAttr  = regexp.MustCompile(`(?:^|\s)terminal=(?:"true"|true)(?:\s|$)`)
+	fileAttr      = regexp.MustCompile(`(?:^|\s)file-id=(?:"[^"]*"|[^\s]+)`)
+	commandAttr   = regexp.MustCompile(`(?:^|\s)(?:cmd-id|command-id)=(?:"[^"]*"|[^\s]+)`)
+	destAttr      = regexp.MustCompile(`(?:^|\s)file="([^"]+)"(?:\s|$)`)
+	overwriteAttr = regexp.MustCompile(`(?:^|\s)overwrite=(?:"true"|true)(?:\s|$)`)
 )
+
+func fenceAttrs(m []string) string {
+	if len(m) < 5 {
+		return ""
+	}
+	if m[3] != "" {
+		return m[3]
+	}
+	return m[4]
+}
+
+// sourceScript is a stable JSONL representation of a source-file write.
+// It is never executed as a shell command.
+func sourceScript(c LabCommand) string { return "write-file " + c.File + "\n" + c.Script }
 
 // normalizeLabScript removes the Markdown list indentation shared by every
 // nonblank line. The original Markdown bytes are retained for rewriting.
@@ -69,7 +95,7 @@ func ParseLab(data []byte) ([]LabCommand, error) {
 			step = m[1]
 		}
 		match := fenceStart.FindStringSubmatch(line)
-		if match == nil || !terminalAttr.MatchString(match[2]) {
+		if match == nil || !terminalAttr.MatchString(fenceAttrs(match)) {
 			offset += len(line)
 			continue
 		}
@@ -91,7 +117,18 @@ func ParseLab(data []byte) ([]LabCommand, error) {
 		if strings.TrimSpace(script) == "" {
 			return nil, fmt.Errorf("empty terminal fence at line %d", i+1)
 		}
-		commands = append(commands, LabCommand{Script: script, Step: step, Line: i + 1, Start: openingOffset, End: scriptStart, Opening: line})
+		language := match[2]
+		attrs := fenceAttrs(match)
+		c := LabCommand{Script: script, Step: step, Line: i + 1, Start: openingOffset, End: scriptStart, Opening: line, Language: language}
+		if language != "bash" && language != "sh" {
+			m := destAttr.FindStringSubmatch(attrs)
+			if m == nil {
+				return nil, fmt.Errorf("line %d: source fence %q requires file= destination", i+1, language)
+			}
+			c.File = m[1]
+			c.Overwrite = overwriteAttr.MatchString(attrs)
+		}
+		commands = append(commands, c)
 		for k := i; k <= j; k++ {
 			offset += len(lines[k])
 		}
@@ -115,7 +152,11 @@ func BindLab(commands []LabCommand, entries []CommandLog) ([]CommandLog, error) 
 	for _, c := range commands {
 		found := -1
 		for i := next; i < len(entries); i++ {
-			if normalizeLabScript(recordedScript(entries[i])) == normalizeLabScript(c.Script) {
+			expected := c.Script
+			if c.File != "" {
+				expected = sourceScript(c)
+			}
+			if normalizeLabScript(recordedScript(entries[i])) == normalizeLabScript(expected) {
 				found = i
 				break
 			}
@@ -132,18 +173,150 @@ func BindLab(commands []LabCommand, entries []CommandLog) ([]CommandLog, error) 
 	return matched, nil
 }
 
-// ExecuteLab runs each fence as one shell
-// invocation through the canonical executor and persists every result to JSONL.
+// ExecuteLab runs shell commands and materializes source files within a lab
+// workspace. A standalone cd command changes the working directory of later
+// blocks. All operations produce JSONL records, including failures.
 func ExecuteLab(ctx context.Context, commands []LabCommand, logger *Logger) ([]CommandLog, error) {
+	root, err := os.Getwd()
+	if err != nil {
+		return nil, err
+	}
+	cwd := root
 	out := make([]CommandLog, 0, len(commands))
 	for _, c := range commands {
-		e := Execute(ctx, "sh", []string{"-c", c.Script}, DefaultTimeout)
+		var e CommandLog
+		if c.File != "" {
+			e = writeSource(c, root, cwd)
+		} else if next, ok := labCD(c.Script); ok {
+			e = labChangeDir(c, root, cwd, next)
+			if e.ExitCode == 0 {
+				cwd = e.Stdout
+				e.Stdout = ""
+			}
+		} else {
+			e = executeLabShell(ctx, c.Script, cwd)
+		}
 		if err := logger.Write(e); err != nil {
 			return nil, fmt.Errorf("line %d: persist execution: %w", c.Line, err)
 		}
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+func labCD(script string) (string, bool) {
+	fields := strings.Fields(script)
+	if len(fields) == 2 && fields[0] == "cd" {
+		return fields[1], true
+	}
+	return "", false
+}
+
+func newLabRecord(command string, args []string, start time.Time, exit int, stdout, stderr string) CommandLog {
+	e := CommandLog{Timestamp: start.UTC().Format(time.RFC3339Nano), Command: command, Args: args, ExitCode: exit, Stdout: stdout, Stderr: stderr, Duration: time.Since(start).String()}
+	nonce := make([]byte, 16)
+	_, _ = rand.Read(nonce)
+	payload, _ := json.Marshal([]any{e.Command, e.Args, e.Timestamp, e.ExitCode, e.Stdout, hex.EncodeToString(nonce)})
+	hash := sha256.Sum256(payload)
+	e.ID = hex.EncodeToString(hash[:8])
+	return e
+}
+
+func labChangeDir(c LabCommand, root, cwd, next string) CommandLog {
+	start := time.Now()
+	dest := filepath.Join(cwd, next)
+	resolved, err := filepath.EvalSymlinks(dest)
+	if err == nil {
+		var info os.FileInfo
+		info, err = os.Stat(resolved)
+		if err == nil && !info.IsDir() {
+			err = fmt.Errorf("not a directory: %s", next)
+		}
+	}
+	if err == nil {
+		rel, relErr := filepath.Rel(root, resolved)
+		if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			err = fmt.Errorf("directory escapes lab workspace: %s", next)
+		}
+	}
+	if err != nil {
+		return newLabRecord("sh", []string{"-c", c.Script}, start, 1, "", err.Error())
+	}
+	return newLabRecord("sh", []string{"-c", c.Script}, start, 0, resolved, "")
+}
+
+func writeSource(c LabCommand, root, cwd string) CommandLog {
+	start := time.Now()
+	args := []string{"-c", sourceScript(c)}
+	fail := func(err error) CommandLog { return newLabRecord("sh", args, start, 1, "", err.Error()) }
+	if c.File == "" || filepath.IsAbs(c.File) {
+		return fail(fmt.Errorf("invalid destination %q", c.File))
+	}
+	dest := filepath.Join(cwd, c.File)
+	rel, err := filepath.Rel(root, dest)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fail(fmt.Errorf("destination escapes lab workspace: %s", c.File))
+	}
+	// Prevent symlink traversal through any existing parent component.
+	parent := filepath.Dir(dest)
+	realParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return fail(err)
+	}
+	rel, err = filepath.Rel(root, realParent)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fail(fmt.Errorf("destination parent escapes workspace: %s", c.File))
+	}
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if c.Overwrite {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+	// Reject symlinks even with overwrite=true.
+	if info, statErr := os.Lstat(dest); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fail(fmt.Errorf("destination is a symlink: %s", c.File))
+	}
+	f, err := os.OpenFile(dest, flags, 0600)
+	if err != nil {
+		return fail(err)
+	}
+	_, writeErr := f.WriteString(c.Script + "\n")
+	closeErr := f.Close()
+	if writeErr != nil {
+		return fail(writeErr)
+	}
+	if closeErr != nil {
+		return fail(closeErr)
+	}
+	return newLabRecord("sh", args, start, 0, "", "")
+}
+
+func executeLabShell(ctx context.Context, script, cwd string) CommandLog {
+	start := time.Now()
+	cctx, cancel := context.WithTimeout(ctx, DefaultTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(cctx, "sh", "-c", script)
+	cmd.Dir = cwd
+	var stdout, stderr limitedBuffer
+	stdout.limit = MaxOutputBytes
+	stderr.limit = MaxOutputBytes
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	exit := 0
+	if err != nil {
+		exit = -1
+		var ee *exec.ExitError
+		if errors.As(err, &ee) {
+			exit = ee.ExitCode()
+		} else if stderr.Len() == 0 {
+			_, _ = stderr.Write([]byte(err.Error()))
+		}
+	}
+	if cctx.Err() != nil {
+		exit = -1
+		_, _ = stderr.Write([]byte("\nexecution interrupted: " + cctx.Err().Error()))
+	}
+	return newLabRecord("sh", []string{"-c", script}, start, exit, stdout.String(), stderr.String())
 }
 
 // RewriteLab changes only terminal fence opening lines, preserving their other
@@ -165,12 +338,12 @@ func RewriteLab(data []byte, commands []LabCommand, matched []CommandLog, logPat
 		b.Write(data[prev:c.Start])
 		line := c.Opening
 		m := fenceStart.FindStringSubmatch(line)
-		attrs := m[2]
+		attrs := fenceAttrs(m)
 		attrs = fileAttr.ReplaceAllString(attrs, "")
 		attrs = commandAttr.ReplaceAllString(attrs, "")
 		attrs = strings.Join(strings.Fields(attrs), " ")
 		attrs += fmt.Sprintf(` file-id="%s" command-id="%s"`, name, matched[i].ID)
-		prefix := strings.SplitN(line, "{", 2)[0]
+		prefix := m[1] + "```" + m[2] + " "
 		ending := "\n"
 		if strings.HasSuffix(line, "\r\n") {
 			ending = "\r\n"

@@ -9,24 +9,23 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // WalkthroughItem is either authored narration or a reference to a recorded command.
 type WalkthroughItem struct {
-	Text   string
-	Record *CommandLog
-	Pause  time.Duration
-	Clear  bool
-	Typing time.Duration
+	Text        string
+	Record      *CommandLog
+	TypingDelay time.Duration
 }
 
 var (
-	boundID        = regexp.MustCompile(`(?:^|\s)command-id="([^"]+)"`)
-	boundFile      = regexp.MustCompile(`(?:^|\s)file-id="([^"]+)"`)
-	markdownLink   = regexp.MustCompile(`\[([^]]+)\]\([^)]+\)`)
-	markdownInline = regexp.MustCompile("[`*_]")
-	typingAttr     = regexp.MustCompile(`(?:^|\s)typing=([^\s}]+)`)
-	listPrefix     = regexp.MustCompile(`^\s*(?:[-*+]\s+|[0-9]+\.\s+)`)
+	boundID         = regexp.MustCompile(`(?:^|\s)command-id="([^"]+)"`)
+	typingAttribute = regexp.MustCompile(`(?:^|\s)typing="?([0-9]+(?:ms|s))"?`)
+	boundFile       = regexp.MustCompile(`(?:^|\s)file-id="([^"]+)"`)
+	markdownLink    = regexp.MustCompile(`\[([^]]+)\]\([^)]+\)`)
+	markdownInline  = regexp.MustCompile("[`*_]")
+	listPrefix      = regexp.MustCompile(`^\s*(?:[-*+]\s+|[0-9]+\.\s+)`)
 )
 
 // ParseWalkthrough reads the presentation order from Markdown. Nonterminal code,
@@ -68,11 +67,11 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 			if strings.HasPrefix(trim, fenceMarker) && strings.Trim(trim, "` ") == "" {
 				inFence = false
 				m := fenceStart.FindStringSubmatch(opening + "\n")
-				if m == nil || !terminalAttr.MatchString(m[2]) {
+				if m == nil || !terminalAttr.MatchString(fenceAttrs(m)) {
 					continue
 				}
-				id := boundID.FindStringSubmatch(m[2])
-				file := boundFile.FindStringSubmatch(m[2])
+				id := boundID.FindStringSubmatch(fenceAttrs(m))
+				file := boundFile.FindStringSubmatch(fenceAttrs(m))
 				if id == nil || file == nil {
 					return nil, fmt.Errorf("line %d: terminal fence requires command-id and file-id", startLine)
 				}
@@ -86,20 +85,28 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 				if !ok {
 					return nil, fmt.Errorf("line %d: command-id %q not found in recording", startLine, id[1])
 				}
-				if normalizeLabScript(strings.Join(script, "\n")) != normalizeLabScript(recordedScript(e)) {
+				expected := strings.Join(script, "\n")
+				if m[2] != "bash" && m[2] != "sh" {
+					dest := destAttr.FindStringSubmatch(fenceAttrs(m))
+					if dest == nil {
+						return nil, fmt.Errorf("line %d: source block requires file=", startLine)
+					}
+					expected = sourceScript(LabCommand{Script: normalizeLabScript(expected), File: dest[1]})
+				}
+				if normalizeLabScript(expected) != normalizeLabScript(recordedScript(e)) {
 					return nil, fmt.Errorf("line %d: command text differs from recorded execution %q", startLine, id[1])
 				}
 				used[id[1]] = true
 				copyRecord := e
-				var typing time.Duration
-				if attr := typingAttr.FindStringSubmatch(m[2]); attr != nil {
-					parsed, err := parsePresentationDuration(attr[1], startLine, "typing")
-					typing = parsed
-					if err != nil {
-						return nil, err
+				var delay time.Duration
+				if attr := typingAttribute.FindStringSubmatch(fenceAttrs(m)); attr != nil {
+					var err error
+					delay, err = time.ParseDuration(attr[1])
+					if err != nil || delay <= 0 {
+						return nil, fmt.Errorf("line %d: invalid typing duration %q", startLine, attr[1])
 					}
 				}
-				items = append(items, WalkthroughItem{Record: &copyRecord, Typing: typing})
+				items = append(items, WalkthroughItem{Record: &copyRecord, TypingDelay: delay})
 				continue
 			}
 			script = append(script, line)
@@ -108,22 +115,6 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 		if match := stepStart.FindStringSubmatch(line); match != nil {
 			items = append(items, WalkthroughItem{Text: "\n=== " + match[1] + " ===\n"})
 			continue
-		}
-		if strings.HasPrefix(trim, "<!-- termcast:") {
-			if trim == "<!-- termcast:clear -->" {
-				items = append(items, WalkthroughItem{Clear: true})
-				continue
-			}
-			if strings.HasPrefix(trim, "<!-- termcast:pause ") && strings.HasSuffix(trim, " -->") {
-				durationText := strings.TrimSuffix(strings.TrimPrefix(trim, "<!-- termcast:pause "), " -->")
-				duration, err := parsePresentationDuration(durationText, i+1, "pause")
-				if err != nil {
-					return nil, err
-				}
-				items = append(items, WalkthroughItem{Pause: duration})
-				continue
-			}
-			return nil, fmt.Errorf("line %d: invalid termcast directive %q", i+1, trim)
 		}
 		if trim == "" || strings.HasPrefix(trim, "{{<") || strings.HasPrefix(trim, "<!--") || strings.HasPrefix(trim, "-->") {
 			continue
@@ -147,18 +138,16 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 	return items, nil
 }
 
-// Durations are deliberately bounded to keep generated casts watchable.
-func parsePresentationDuration(value string, line int, name string) (time.Duration, error) {
-	d, err := time.ParseDuration(value)
-	if err != nil || d <= 0 || d > 30*time.Second {
-		return 0, fmt.Errorf("line %d: %s duration %q must be greater than zero and at most 30s", line, name, value)
-	}
-	return d, nil
-}
-
 // WriteWalkthroughCast writes a guided cast with authored narration and recorded
 // outputs. It does not execute commands or infer stdout/stderr chunk timing.
 func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...bool) error {
+	return WriteWalkthroughCastThemed(w, items, "", showExitCode...)
+}
+
+func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme string, showExitCode ...bool) error {
+	if err := ValidateHighlightTheme(theme); err != nil {
+		return err
+	}
 	bw := bufio.NewWriter(w)
 	header := map[string]any{"version": 2, "width": 100, "height": 30, "timestamp": int64(0), "env": map[string]string{"TERM": "xterm-256color"}}
 	for _, item := range items {
@@ -181,16 +170,6 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 		return err
 	}
 	for _, item := range items {
-		if item.Clear {
-			if err := writeCastJSON(bw, []any{elapsed, "o", "\x1b[2J\x1b[H"}); err != nil {
-				return err
-			}
-			continue
-		}
-		if item.Pause > 0 {
-			elapsed += item.Pause.Seconds()
-			continue
-		}
 		if item.Record == nil {
 			if err := emit("\r\n" + item.Text + "\r\n"); err != nil {
 				return err
@@ -198,23 +177,40 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 			continue
 		}
 		e := item.Record
-		if item.Typing > 0 {
-			if err := writeCastJSON(bw, []any{elapsed, "o", "\r\n$ "}); err != nil {
+		highlighted := HighlightCastInput(recordedScript(*e), theme)
+		if item.TypingDelay <= 0 {
+			if err := emit("\r\n$ " + highlighted + "\r\n"); err != nil {
 				return err
 			}
-			command := recordedScript(*e)
-			for _, r := range command {
-				if err := writeCastJSON(bw, []any{elapsed, "o", string(r)}); err != nil {
+		} else {
+			if err := emit("\r\n$ "); err != nil {
+				return err
+			}
+			// ANSI escape sequences do not consume typing time; each visible
+			// Unicode character gets its own output event.
+			delay := item.TypingDelay.Seconds()
+			for len(highlighted) > 0 {
+				if highlighted[0] == '\x1b' {
+					end := strings.IndexByte(highlighted, 'm')
+					if end < 0 {
+						return fmt.Errorf("unterminated highlight escape")
+					}
+					if err := writeCastJSON(bw, []any{elapsed, "o", highlighted[:end+1]}); err != nil {
+						return err
+					}
+					highlighted = highlighted[end+1:]
+					continue
+				}
+				_, width := utf8.DecodeRuneInString(highlighted)
+				if err := writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(highlighted[:width])}); err != nil {
 					return err
 				}
-				elapsed += item.Typing.Seconds()
+				elapsed += delay
+				highlighted = highlighted[width:]
 			}
-			if err := writeCastJSON(bw, []any{elapsed, "o", "\r\n"}); err != nil {
+			if err := emit("\r\n"); err != nil {
 				return err
 			}
-			elapsed += 0.7
-		} else if err := emit("\r\n$ " + recordedScript(*e) + "\r\n"); err != nil {
-			return err
 		}
 		if e.Stdout != "" {
 			if err := emit(e.Stdout); err != nil {
@@ -238,6 +234,13 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 // ExportWalkthroughCast exclusively creates a read-only demo from bound Markdown
 // and JSONL, and removes partial output on failure.
 func ExportWalkthroughCast(labPath, logPath, output string, showExitCode ...bool) error {
+	return ExportWalkthroughCastThemed(labPath, logPath, output, "", showExitCode...)
+}
+
+func ExportWalkthroughCastThemed(labPath, logPath, output, theme string, showExitCode ...bool) error {
+	if err := ValidateHighlightTheme(theme); err != nil {
+		return err
+	}
 	labAbs, _ := filepath.Abs(labPath)
 	logAbs, _ := filepath.Abs(logPath)
 	outAbs, _ := filepath.Abs(output)
@@ -261,7 +264,7 @@ func ExportWalkthroughCast(labPath, logPath, output string, showExitCode ...bool
 		return err
 	}
 	defer f.Close()
-	if err := WriteWalkthroughCast(f, items, showExitCode...); err != nil {
+	if err := WriteWalkthroughCastThemed(f, items, theme, showExitCode...); err != nil {
 		_ = os.Remove(output)
 		return err
 	}

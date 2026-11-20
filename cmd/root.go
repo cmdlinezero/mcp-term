@@ -68,7 +68,8 @@ func newRoot() *cobra.Command {
 	replay.Flags().StringVarP(&input, "log", "l", "session.jsonl", "Source session log")
 	replay.Flags().StringVarP(&output, "output", "o", "replay-session.jsonl", "New replay log (must not exist)")
 	var exportLog, exportOutput, exportLab string
-	var exportShowExitCode bool
+	var exportShowExitCode, exportNoHighlight bool
+	var exportTheme string
 	export := &cobra.Command{Use: "export-asciinema", Short: "Export recorded JSONL to asciicast v2 without executing commands", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
 		a, err := filepath.Abs(exportLog)
 		if err != nil {
@@ -81,12 +82,23 @@ func newRoot() *cobra.Command {
 		if a == b {
 			return fmt.Errorf("input and output must differ")
 		}
+		if exportNoHighlight {
+			exportTheme = ""
+		}
+		if err := internal.ValidateHighlightTheme(exportTheme); err != nil {
+			return err
+		}
+		if exportLab == "" && exportTheme != "" {
+			return fmt.Errorf("--theme requires --lab (bound Markdown)")
+		}
 		if exportLab != "" {
-			return internal.ExportWalkthroughCast(exportLab, a, b, exportShowExitCode)
+			return internal.ExportWalkthroughCastThemed(exportLab, a, b, exportTheme, exportShowExitCode)
 		}
 		return internal.ExportAsciicast(a, b, exportShowExitCode)
 	}}
 	export.Flags().StringVar(&exportLab, "lab", "", "Bound Markdown lab for annotated walkthrough export")
+	export.Flags().StringVar(&exportTheme, "theme", "", "Built-in highlighting theme: dracula, monokai, github-dark (default: plain)")
+	export.Flags().BoolVar(&exportNoHighlight, "no-highlight", false, "Disable command syntax highlighting")
 	export.Flags().BoolVar(&exportShowExitCode, "show-exit-code", false, "Display [exit N] markers in the cast (hidden by default)")
 	export.Flags().StringVar(&exportLog, "log", "session.jsonl", "Source JSONL recording")
 	export.Flags().StringVar(&exportOutput, "output", "session.cast", "New asciicast v2 output file")

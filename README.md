@@ -372,3 +372,17 @@ required: existing walkthroughs retain their previous rendering.
 TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
 
 
+
+### CHANGE-010: Built-in walkthrough syntax themes
+
+Use `--theme dracula`, `--theme monokai`, or `--theme github-dark` with
+`export-asciinema --lab bound.md` to color command input and Go source-file
+blocks in the exported asciicast. Recorded stdout/stderr is left unchanged.
+The default is plain (backward-compatible); `--no-highlight` forces plain
+output even when a theme is specified. The theme applies only to bound
+Markdown walkthrough export, not JSONL-only export.
+
+```sh
+./mcp-term export-asciinema --lab bound.md --log session.jsonl --output demo.cast --theme dracula
+./mcp-term export-asciinema --lab bound.md --log session.jsonl --output plain.cast --no-highlight
+```
