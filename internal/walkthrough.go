@@ -151,7 +151,9 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 
 // WalkthroughPresentation controls only generated cast events, never recordings.
 type WalkthroughPresentation struct {
-	OperationDelay time.Duration
+	OperationDelay  time.Duration
+	SourceLineDelay time.Duration // Optional line-by-line source reveal; zero displays immediately.
+	Title           string        // Optional terminal header title.
 }
 
 func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme string, showExitCode ...bool) error {
@@ -162,6 +164,9 @@ func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme stri
 func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme string, presentation WalkthroughPresentation, showExitCode ...bool) error {
 	if presentation.OperationDelay < 0 || presentation.OperationDelay > 30*time.Second {
 		return fmt.Errorf("operation delay must be between 0 and 30s")
+	}
+	if presentation.SourceLineDelay < 0 || presentation.SourceLineDelay > 30*time.Second {
+		return fmt.Errorf("source line delay must be between 0 and 30s")
 	}
 	if err := ValidateHighlightTheme(theme); err != nil {
 		return err
@@ -185,6 +190,17 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 	emit := func(s string) error {
 		return writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(s)})
 	}
+	// The header uses printable ANSI styling only, without cursor positioning.
+	title := strings.TrimSpace(presentation.Title)
+	if title == "" {
+		title = "TermCast walkthrough"
+	}
+	if strings.ContainsAny(title, "\r\n\x1b") {
+		return fmt.Errorf("walkthrough title must be a single plain-text line")
+	}
+	if err := emit("\x1b[2m┌─ " + title + " ─┐\x1b[0m\r\n"); err != nil {
+		return err
+	}
 	// Directory context is inferred only from successful, simple standalone cd commands.
 	// No initial directory is invented: the prompt remains "$ " until known.
 	cwd := ""
@@ -201,7 +217,7 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		script := recordedScript(*e)
 		if item.SourceFile != "" {
 			// Source-file operations have a visible destination, not a misleading shell prompt.
-			if err := emit("\r\n[write file: " + item.SourceFile + "]\r\n"); err != nil {
+			if err := emit("\r\n\x1b[2m── " + item.SourceFile + " ──\x1b[0m\r\n"); err != nil {
 				return err
 			}
 			script = strings.TrimPrefix(script, "write-file "+item.SourceFile+"\n")
@@ -222,7 +238,26 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		if item.SourceFile != "" {
 			prompt = ""
 		}
-		if item.TypingDelay <= 0 {
+		if item.SourceFile != "" && presentation.SourceLineDelay > 0 {
+			if err := emit("\r\n"); err != nil {
+				return err
+			}
+			// Split only on actual newlines; ANSI color sequences remain intact.
+			for _, line := range strings.SplitAfter(highlighted, "\n") {
+				if line == "" {
+					continue
+				}
+				if err := emit(line); err != nil {
+					return err
+				}
+				elapsed += presentation.SourceLineDelay.Seconds()
+			}
+			if !strings.HasSuffix(highlighted, "\n") {
+				if err := emit("\r\n"); err != nil {
+					return err
+				}
+			}
+		} else if item.TypingDelay <= 0 {
 			if err := emit("\r\n" + prompt + highlighted + "\r\n"); err != nil {
 				return err
 			}
@@ -230,9 +265,8 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 			if err := emit("\r\n" + prompt); err != nil {
 				return err
 			}
-			// ANSI escape sequences do not consume typing time; each visible
-			// Unicode character gets its own output event.
-			delay := item.TypingDelay.Seconds()
+			// ANSI SGR sequences are instantaneous; visible runes consume typing time.
+			// Newlines are normalized as terminal line breaks, not literal LF.
 			for len(highlighted) > 0 {
 				if highlighted[0] == '\x1b' {
 					end := strings.IndexByte(highlighted, 'm')
@@ -245,11 +279,15 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 					highlighted = highlighted[end+1:]
 					continue
 				}
-				_, width := utf8.DecodeRuneInString(highlighted)
-				if err := writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(highlighted[:width])}); err != nil {
+				r, width := utf8.DecodeRuneInString(highlighted)
+				chunk := highlighted[:width]
+				if r == '\n' {
+					chunk = "\r\n"
+				}
+				if err := writeCastJSON(bw, []any{elapsed, "o", chunk}); err != nil {
 					return err
 				}
-				elapsed += delay
+				elapsed += item.TypingDelay.Seconds()
 				highlighted = highlighted[width:]
 			}
 			if err := emit("\r\n"); err != nil {
@@ -268,6 +306,14 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		}
 		if len(showExitCode) > 0 && showExitCode[0] {
 			if err := emit(fmt.Sprintf("\r\n[exit %d]\r\n", e.ExitCode)); err != nil {
+				return err
+			}
+		} else if e.ExitCode == 0 {
+			if err := emit("\r\n\x1b[2m✓ done\x1b[0m\r\n"); err != nil {
+				return err
+			}
+		} else {
+			if err := emit("\r\n\x1b[31m✗ failed\x1b[0m\r\n"); err != nil {
 				return err
 			}
 		}
@@ -308,6 +354,15 @@ func ExportWalkthroughCastPolished(labPath, logPath, output, theme string, prese
 	entries, err := ReadLogs(logPath)
 	if err != nil {
 		return err
+	}
+	// Prefer the authored front-matter title when the caller has not supplied one.
+	if presentation.Title == "" {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "title:") {
+				presentation.Title = strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "title:")), "\"'")
+				break
+			}
+		}
 	}
 	items, err := ParseWalkthrough(data, entries, logPath)
 	if err != nil {

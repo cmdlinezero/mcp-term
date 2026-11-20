@@ -124,7 +124,7 @@ func TestWalkthroughPolishPacingSourceAndDirectory(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := b.String()
-		for _, want := range []string{"[write file: main.go]", "package", "adk-go-tutorial $ "} {
+		for _, want := range []string{"── main.go ──", "package", "adk-go-tutorial $ "} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("theme %q missing %q", theme, want)
 			}
@@ -151,5 +151,42 @@ func TestWalkthroughDirectoryInferenceConservative(t *testing.T) {
 	}
 	if got, ok := nextWalkthroughDir("project", "cd src"); !ok || got != "project/src" {
 		t.Fatalf("got %q, %v", got, ok)
+	}
+}
+
+func TestWalkthroughFinalPresentation(t *testing.T) {
+	good := sampleCastRecord()
+	good.Command, good.Args = "sh", []string{"-c", "echo first\necho second"}
+	bad := sampleCastRecord()
+	bad.Command, bad.Args, bad.ExitCode = "sh", []string{"-c", "false"}, 7
+	source := sampleCastRecord()
+	source.Command, source.Args = "sh", []string{"-c", "write-file main.go\npackage main\nfunc main() {}"}
+	items := []WalkthroughItem{{Record: &good, TypingDelay: time.Millisecond}, {Record: &source, SourceFile: "main.go"}, {Record: &bad}}
+	for _, theme := range []string{"", "dracula", "monokai", "github-dark"} {
+		var b bytes.Buffer
+		err := WriteWalkthroughCastPolished(&b, items, theme, WalkthroughPresentation{OperationDelay: time.Millisecond, SourceLineDelay: 10 * time.Millisecond, Title: "ADK Lab"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := b.String()
+		for _, want := range []string{"ADK Lab", "── main.go ──", "✓ done", "✗ failed", "── main.go ──"} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("theme %q missing %q", theme, want)
+			}
+		}
+		if strings.Contains(text, "[write file:") {
+			t.Fatal("old source label")
+		}
+		if strings.Contains(text, "[exit 7]") {
+			t.Fatal("numeric exit code visible by default")
+		}
+		if strings.Count(text, `,"o",`) < 20 {
+			t.Fatal("missing progressive events")
+		}
+	}
+	for _, delay := range []time.Duration{-time.Millisecond, 31 * time.Second} {
+		if err := WriteWalkthroughCastPolished(&bytes.Buffer{}, items, "", WalkthroughPresentation{SourceLineDelay: delay}); err == nil {
+			t.Fatalf("accepted %v", delay)
+		}
 	}
 }

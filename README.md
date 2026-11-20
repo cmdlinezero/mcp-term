@@ -381,3 +381,26 @@ operations (default `700ms`, allowed `0s` through `30s`). Explicit
 
 This option applies only to Markdown-bound walkthrough exports; plain JSONL
 exports retain their existing timing. The exported file remains asciinema v2.
+
+### CHANGE-012: Final walkthrough presentation refinements
+
+Markdown-bound asciinema exports include a compact ANSI-compatible heading
+(using the Markdown front-matter `title` when available), consistent shell
+prompts, and subtle `✓ done` / `✗ failed` indicators based on recorded exit
+status. `--show-exit-code` retains explicit numeric `[exit N]` markers instead.
+Source writes use concise `── main.go ──` headings rather than internal
+`write-file` labels. Recorded stdout/stderr are never modified.
+
+Use `--source-line-delay 100ms` to reveal source files line by line (default
+`0s`, immediate). Existing `typing="35ms"` also animates multiline shell
+commands, including terminal-correct line breaks. Operation pacing remains
+controlled by `--operation-delay`.
+
+```sh
+./mcp-term export-asciinema --lab bound.md --log session.jsonl \
+  --output polished.cast --theme github-dark --operation-delay 1s \
+  --source-line-delay 100ms
+```
+
+These are read-only export options. JSONL, recorded outputs, and asciinema v2
+compatibility are preserved.
