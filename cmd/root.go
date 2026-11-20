@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/cmdlinezero/mcp-term/internal"
 	"github.com/spf13/cobra"
@@ -69,7 +70,8 @@ func newRoot() *cobra.Command {
 	replay.Flags().StringVarP(&output, "output", "o", "replay-session.jsonl", "New replay log (must not exist)")
 	var exportLog, exportOutput, exportLab string
 	var exportShowExitCode, exportNoHighlight bool
-	var exportTheme string
+	var exportTheme, exportPresentation, exportSourceReveal string
+	var exportOperationDelay, exportSourceLineDelay time.Duration
 	export := &cobra.Command{Use: "export-asciinema", Short: "Export recorded JSONL to asciicast v2 without executing commands", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
 		a, err := filepath.Abs(exportLog)
 		if err != nil {
@@ -91,11 +93,18 @@ func newRoot() *cobra.Command {
 		if exportLab == "" && exportTheme != "" {
 			return fmt.Errorf("--theme requires --lab (bound Markdown)")
 		}
+		if exportLab == "" && exportPresentation != "tutorial" {
+			return fmt.Errorf("--presentation requires --lab")
+		}
 		if exportLab != "" {
-			return internal.ExportWalkthroughCastThemed(exportLab, a, b, exportTheme, exportShowExitCode)
+			return internal.ExportWalkthroughCastPolished(exportLab, a, b, exportTheme, internal.WalkthroughPresentation{OperationDelay: exportOperationDelay, SourceLineDelay: exportSourceLineDelay, SourceReveal: exportSourceReveal, Mode: exportPresentation}, exportShowExitCode)
 		}
 		return internal.ExportAsciicast(a, b, exportShowExitCode)
 	}}
+	export.Flags().StringVar(&exportPresentation, "presentation", "tutorial", "Walkthrough content: tutorial or demo (--lab only)")
+	export.Flags().StringVar(&exportSourceReveal, "source-reveal", "lines", "Source presentation: lines or smooth (GIF-friendly; --lab only)")
+	export.Flags().DurationVar(&exportSourceLineDelay, "source-line-delay", 0, "Reveal source files one line at a time (0 disables; --lab only)")
+	export.Flags().DurationVar(&exportOperationDelay, "operation-delay", 700*time.Millisecond, "Pause between walkthrough operations (0s–30s; --lab only)")
 	export.Flags().StringVar(&exportLab, "lab", "", "Bound Markdown lab for annotated walkthrough export")
 	export.Flags().StringVar(&exportTheme, "theme", "", "Built-in highlighting theme: dracula, monokai, github-dark (default: plain)")
 	export.Flags().BoolVar(&exportNoHighlight, "no-highlight", false, "Disable command syntax highlighting")

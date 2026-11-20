@@ -17,6 +17,8 @@ type WalkthroughItem struct {
 	Text        string
 	Record      *CommandLog
 	TypingDelay time.Duration
+	SourceFile  string
+	Kind        string // step, task, narration, info, warn, hint
 }
 
 var (
@@ -67,7 +69,16 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 			if strings.HasPrefix(trim, fenceMarker) && strings.Trim(trim, "` ") == "" {
 				inFence = false
 				m := fenceStart.FindStringSubmatch(opening + "\n")
-				if m == nil || !terminalAttr.MatchString(fenceAttrs(m)) {
+				if m == nil {
+					continue
+				}
+				if !terminalAttr.MatchString(fenceAttrs(m)) {
+					if kind := strings.ToLower(m[2]); kind == "info" || kind == "warn" || kind == "hint" {
+						body := strings.TrimSpace(strings.Join(script, "\n"))
+						if body != "" {
+							items = append(items, WalkthroughItem{Text: body, Kind: kind})
+						}
+					}
 					continue
 				}
 				id := boundID.FindStringSubmatch(fenceAttrs(m))
@@ -106,27 +117,37 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 						return nil, fmt.Errorf("line %d: invalid typing duration %q", startLine, attr[1])
 					}
 				}
-				items = append(items, WalkthroughItem{Record: &copyRecord, TypingDelay: delay})
+				sourceFile := ""
+				if m[2] != "bash" && m[2] != "sh" {
+					sourceFile = destAttr.FindStringSubmatch(fenceAttrs(m))[1]
+				}
+				items = append(items, WalkthroughItem{Record: &copyRecord, TypingDelay: delay, SourceFile: sourceFile})
 				continue
 			}
 			script = append(script, line)
 			continue
 		}
 		if match := stepStart.FindStringSubmatch(line); match != nil {
-			items = append(items, WalkthroughItem{Text: "\n=== " + match[1] + " ===\n"})
+			items = append(items, WalkthroughItem{Text: "\n=== " + match[1] + " ===\n", Kind: "step"})
 			continue
 		}
 		if trim == "" || strings.HasPrefix(trim, "{{<") || strings.HasPrefix(trim, "<!--") || strings.HasPrefix(trim, "-->") {
 			continue
 		}
+		kind := "narration"
+		if strings.HasPrefix(trim, "### ") {
+			kind = "task"
+		}
 		if strings.HasPrefix(trim, "#") {
 			trim = strings.TrimSpace(strings.TrimLeft(trim, "#"))
 		}
-		trim = listPrefix.ReplaceAllString(trim, "")
+		if kind != "task" {
+			trim = listPrefix.ReplaceAllString(trim, "")
+		}
 		trim = markdownLink.ReplaceAllString(trim, "$1")
 		trim = markdownInline.ReplaceAllString(trim, "")
 		if trim != "" {
-			items = append(items, WalkthroughItem{Text: trim})
+			items = append(items, WalkthroughItem{Text: trim, Kind: kind})
 		}
 	}
 	if inFence {
@@ -144,8 +165,36 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 	return WriteWalkthroughCastThemed(w, items, "", showExitCode...)
 }
 
+// WalkthroughPresentation controls only generated cast events, never recordings.
+type WalkthroughPresentation struct {
+	OperationDelay  time.Duration
+	SourceLineDelay time.Duration // Optional line-by-line source reveal; zero displays immediately.
+	SourceReveal    string        // "" or "lines" (legacy), "smooth" (GIF-friendly chunks).
+	Title           string        // Optional terminal header title.
+	Mode            string        // tutorial (default) or demo.
+}
+
 func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme string, showExitCode ...bool) error {
+	return WriteWalkthroughCastPolished(w, items, theme, WalkthroughPresentation{OperationDelay: 700 * time.Millisecond}, showExitCode...)
+}
+
+// WriteWalkthroughCastPolished renders bound Markdown with explicit inter-operation pacing.
+func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme string, presentation WalkthroughPresentation, showExitCode ...bool) error {
+	if presentation.OperationDelay < 0 || presentation.OperationDelay > 30*time.Second {
+		return fmt.Errorf("operation delay must be between 0 and 30s")
+	}
+	if presentation.SourceLineDelay < 0 || presentation.SourceLineDelay > 30*time.Second {
+		return fmt.Errorf("source line delay must be between 0 and 30s")
+	}
+	if presentation.SourceReveal != "" && presentation.SourceReveal != "lines" && presentation.SourceReveal != "smooth" {
+		return fmt.Errorf("invalid source reveal %q (use lines or smooth)", presentation.SourceReveal)
+	}
 	if err := ValidateHighlightTheme(theme); err != nil {
+		return err
+	}
+	var err error
+	items, err = selectWalkthroughItems(items, presentation.Mode)
+	if err != nil {
 		return err
 	}
 	bw := bufio.NewWriter(w)
@@ -165,30 +214,126 @@ func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme stri
 	}
 	elapsed := 0.0
 	emit := func(s string) error {
-		err := writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(s)})
-		elapsed += 0.7
+		return writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(s)})
+	}
+	// The header uses printable ANSI styling only, without cursor positioning.
+	title := strings.TrimSpace(presentation.Title)
+	if title == "" {
+		title = "TermCast walkthrough"
+	}
+	if strings.ContainsAny(title, "\r\n\x1b") {
+		return fmt.Errorf("walkthrough title must be a single plain-text line")
+	}
+	if err := emit("\x1b[2m┌─ " + title + " ─┐\x1b[0m\r\n"); err != nil {
 		return err
 	}
+	// Directory context is inferred only from successful, simple standalone cd commands.
+	// No initial directory is invented: the prompt remains "$ " until known.
+	cwd := ""
+	advance := func() { elapsed += presentation.OperationDelay.Seconds() }
 	for _, item := range items {
 		if item.Record == nil {
-			if err := emit("\r\n" + item.Text + "\r\n"); err != nil {
+			text := item.Text
+			switch item.Kind {
+			case "info", "warn", "hint":
+				prefix, color := "INFO", "\x1b[32m"
+				if item.Kind == "warn" {
+					prefix, color = "WARN", "\x1b[31m"
+				}
+				if item.Kind == "hint" {
+					prefix, color = "HINT", "\x1b[36m"
+				}
+				if theme == "" {
+					color = ""
+				}
+				reset := ""
+				if color != "" {
+					reset = "\x1b[0m"
+				}
+				// Printable delimiters remain visible in uncolored exports and GIFs.
+				header := "── " + prefix + " ──"
+				// Fixed, compact framing: half of the 100-column cast width,
+				// capped at 40 columns. Never grow with callout content.
+				const ruleWidth = 40
+				text = color + header + reset + "\r\n" + text + "\r\n" + color + strings.Repeat("─", ruleWidth) + reset
+			}
+			if err := emit("\r\n" + text + "\r\n"); err != nil {
 				return err
 			}
+			advance()
 			continue
 		}
 		e := item.Record
-		highlighted := HighlightCastInput(recordedScript(*e), theme)
-		if item.TypingDelay <= 0 {
-			if err := emit("\r\n$ " + highlighted + "\r\n"); err != nil {
+		script := recordedScript(*e)
+		if item.SourceFile != "" {
+			// Source-file operations have a visible destination, not a misleading shell prompt.
+			if err := emit("\r\n\x1b[2m── " + item.SourceFile + " ──\x1b[0m\r\n"); err != nil {
+				return err
+			}
+			script = strings.TrimPrefix(script, "write-file "+item.SourceFile+"\n")
+		}
+		highlighted := HighlightCastInput(script, theme)
+		// Keep the existing Go syntax mode for file bodies, without displaying the
+		// internal write-file recording representation.
+		if item.SourceFile != "" && theme != "" {
+			colored := HighlightCastInput(recordedScript(*e), theme)
+			if pos := strings.IndexByte(colored, '\n'); pos >= 0 {
+				highlighted = colored[pos+1:]
+			}
+		}
+		prompt := "$ "
+		if cwd != "" {
+			prompt = cwd + " $ "
+		}
+		if item.SourceFile != "" {
+			prompt = ""
+		}
+		if item.SourceFile != "" && presentation.SourceReveal == "smooth" {
+			if err := emit("\r\n"); err != nil {
+				return err
+			}
+			// Short bursts yield more GIF frames than whole-line events.
+			// Keep ANSI SGR escapes intact and never split UTF-8 runes.
+			for _, chunk := range smoothSourceChunks(highlighted, 8) {
+				if err := emit(chunk); err != nil {
+					return err
+				}
+				elapsed += 0.025
+			}
+			if !strings.HasSuffix(highlighted, "\n") {
+				if err := emit("\r\n"); err != nil {
+					return err
+				}
+			}
+		} else if item.SourceFile != "" && presentation.SourceLineDelay > 0 {
+			if err := emit("\r\n"); err != nil {
+				return err
+			}
+			// Split only on actual newlines; ANSI color sequences remain intact.
+			for _, line := range strings.SplitAfter(highlighted, "\n") {
+				if line == "" {
+					continue
+				}
+				if err := emit(line); err != nil {
+					return err
+				}
+				elapsed += presentation.SourceLineDelay.Seconds()
+			}
+			if !strings.HasSuffix(highlighted, "\n") {
+				if err := emit("\r\n"); err != nil {
+					return err
+				}
+			}
+		} else if item.TypingDelay <= 0 {
+			if err := emit("\r\n" + prompt + highlighted + "\r\n"); err != nil {
 				return err
 			}
 		} else {
-			if err := emit("\r\n$ "); err != nil {
+			if err := emit("\r\n" + prompt); err != nil {
 				return err
 			}
-			// ANSI escape sequences do not consume typing time; each visible
-			// Unicode character gets its own output event.
-			delay := item.TypingDelay.Seconds()
+			// ANSI SGR sequences are instantaneous; visible runes consume typing time.
+			// Newlines are normalized as terminal line breaks, not literal LF.
 			for len(highlighted) > 0 {
 				if highlighted[0] == '\x1b' {
 					end := strings.IndexByte(highlighted, 'm')
@@ -201,11 +346,15 @@ func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme stri
 					highlighted = highlighted[end+1:]
 					continue
 				}
-				_, width := utf8.DecodeRuneInString(highlighted)
-				if err := writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(highlighted[:width])}); err != nil {
+				r, width := utf8.DecodeRuneInString(highlighted)
+				chunk := highlighted[:width]
+				if r == '\n' {
+					chunk = "\r\n"
+				}
+				if err := writeCastJSON(bw, []any{elapsed, "o", chunk}); err != nil {
 					return err
 				}
-				elapsed += delay
+				elapsed += item.TypingDelay.Seconds()
 				highlighted = highlighted[width:]
 			}
 			if err := emit("\r\n"); err != nil {
@@ -226,9 +375,63 @@ func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme stri
 			if err := emit(fmt.Sprintf("\r\n[exit %d]\r\n", e.ExitCode)); err != nil {
 				return err
 			}
+		} else if e.ExitCode == 0 {
+			if err := emit("\r\n\x1b[2m✓ done\x1b[0m\r\n"); err != nil {
+				return err
+			}
+		} else {
+			if err := emit("\r\n\x1b[31m✗ failed\x1b[0m\r\n"); err != nil {
+				return err
+			}
 		}
+		if e.ExitCode == 0 && item.SourceFile == "" {
+			if next, ok := nextWalkthroughDir(cwd, script); ok {
+				cwd = next
+			}
+		}
+		advance()
 	}
 	return bw.Flush()
+}
+
+// smoothSourceChunks preserves terminal color sequences while revealing a source
+// file in short bursts. A newline ends the current chunk so terminal wrapping
+// and line breaks remain faithful to the original source.
+func smoothSourceChunks(source string, maxRunes int) []string {
+	var chunks []string
+	var current strings.Builder
+	visible := 0
+	flush := func() {
+		if current.Len() > 0 {
+			chunks = append(chunks, current.String())
+			current.Reset()
+			visible = 0
+		}
+	}
+	for len(source) > 0 {
+		if source[0] == '\x1b' {
+			end := strings.IndexByte(source, 'm')
+			if end >= 0 {
+				current.WriteString(source[:end+1])
+				source = source[end+1:]
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(source)
+		source = source[size:]
+		if r == '\n' {
+			current.WriteString("\r\n")
+			flush()
+			continue
+		}
+		current.WriteRune(r)
+		visible++
+		if visible >= maxRunes {
+			flush()
+		}
+	}
+	flush()
+	return chunks
 }
 
 // ExportWalkthroughCast exclusively creates a read-only demo from bound Markdown
@@ -238,6 +441,10 @@ func ExportWalkthroughCast(labPath, logPath, output string, showExitCode ...bool
 }
 
 func ExportWalkthroughCastThemed(labPath, logPath, output, theme string, showExitCode ...bool) error {
+	return ExportWalkthroughCastPolished(labPath, logPath, output, theme, WalkthroughPresentation{OperationDelay: 700 * time.Millisecond}, showExitCode...)
+}
+
+func ExportWalkthroughCastPolished(labPath, logPath, output, theme string, presentation WalkthroughPresentation, showExitCode ...bool) error {
 	if err := ValidateHighlightTheme(theme); err != nil {
 		return err
 	}
@@ -255,6 +462,15 @@ func ExportWalkthroughCastThemed(labPath, logPath, output, theme string, showExi
 	if err != nil {
 		return err
 	}
+	// Prefer the authored front-matter title when the caller has not supplied one.
+	if presentation.Title == "" {
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(strings.TrimSpace(line), "title:") {
+				presentation.Title = strings.Trim(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "title:")), "\"'")
+				break
+			}
+		}
+	}
 	items, err := ParseWalkthrough(data, entries, logPath)
 	if err != nil {
 		return err
@@ -264,9 +480,69 @@ func ExportWalkthroughCastThemed(labPath, logPath, output, theme string, showExi
 		return err
 	}
 	defer f.Close()
-	if err := WriteWalkthroughCastThemed(f, items, theme, showExitCode...); err != nil {
+	if err := WriteWalkthroughCastPolished(f, items, theme, presentation, showExitCode...); err != nil {
 		_ = os.Remove(output)
 		return err
 	}
 	return f.Sync()
+}
+
+// nextWalkthroughDir intentionally handles only unambiguous standalone cd paths.
+// Compound shell commands, variables, and home-directory expansion are not guessed.
+func nextWalkthroughDir(current, script string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(script))
+	if len(fields) != 2 || fields[0] != "cd" {
+		return "", false
+	}
+	path := fields[1]
+	if strings.ContainsAny(path, "\"'`$;|&\\") || strings.HasPrefix(path, "~") || path == "-" {
+		return "", false
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), true
+	}
+	if current == "" && (path == ".." || strings.HasPrefix(path, "../")) {
+		return "", false
+	}
+	return filepath.Clean(filepath.Join(current, path)), true
+}
+
+// selectWalkthroughItems keeps the full authored walkthrough by default. Demo
+// retains only executable steps, their immediately preceding task headings,
+// and warnings. It never changes the recorded operations or their order.
+func selectWalkthroughItems(items []WalkthroughItem, mode string) ([]WalkthroughItem, error) {
+	if mode == "" || mode == "tutorial" {
+		return items, nil
+	}
+	if mode != "demo" {
+		return nil, fmt.Errorf("invalid presentation mode %q (use tutorial or demo)", mode)
+	}
+	keep := make([]bool, len(items))
+	lastStep, lastTask := -1, -1
+	for i, item := range items {
+		switch item.Kind {
+		case "step":
+			lastStep, lastTask = i, -1
+		case "task":
+			lastTask = i
+		case "warn":
+			keep[i] = true
+		}
+		if item.Record != nil {
+			keep[i] = true
+			if lastStep >= 0 {
+				keep[lastStep] = true
+			}
+			if lastTask >= 0 {
+				keep[lastTask] = true
+			}
+		}
+	}
+	selected := make([]WalkthroughItem, 0, len(items))
+	for i, item := range items {
+		if keep[i] {
+			selected = append(selected, item)
+		}
+	}
+	return selected, nil
 }
