@@ -341,32 +341,6 @@ created exclusively and existing files are never overwritten.
 
 Exit-code markers are omitted from both raw and lab-aware casts by default. Use `--show-exit-code` with `export-asciinema` to display them when demonstrating failures.
 
-## Markdown walkthrough presentation controls (CHANGE-008)
-
-The bound Markdown remains the source of presentation instructions. These controls
-only affect read-only export-asciinema --lab playback; the JSONL recording is
-not modified and commands are never re-executed.
-
-Add typing=35ms to an individual bound terminal fence to reveal only its
-command text character by character. Output is displayed normally. The
-attribute is preserved when lab-import --bind-only (or DejaVu bind) rewrites
-the Markdown fence:
-
-<!-- termcast:pause 2s -->
-<!-- termcast:clear -->
-
-## Inspect Docker
-
-```bash {terminal=true typing=35ms file-id="session.jsonl" command-id="record-id"}
-docker version
-```
-<!-- termcast:pause 2s --> inserts a pause at that position in the
-walkthrough; <!-- termcast:clear --> clears the terminal and resets the
-cursor immediately. Neither directive needs an ending marker. Durations must
-be greater than zero and no more than 30 seconds. Invalid directives and
-invalid typing durations fail with a Markdown line number. No directive is
-required: existing walkthroughs retain their previous rendering.
-
 ## License
 
 TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
@@ -386,3 +360,24 @@ Markdown walkthrough export, not JSONL-only export.
 ./mcp-term export-asciinema --lab bound.md --log session.jsonl --output demo.cast --theme dracula
 ./mcp-term export-asciinema --lab bound.md --log session.jsonl --output plain.cast --no-highlight
 ```
+
+
+### CHANGE-011: Walkthrough presentation polish
+
+Bound Markdown exports now display source-file writes as `[write file: main.go]`
+followed by highlighted source rather than the internal `write-file` command.
+Successful, standalone `cd path` commands update subsequent shell prompts when the
+path can be determined without guessing. Complex shell expressions do not alter
+the displayed directory. Recorded stdout/stderr and JSONL are unchanged.
+
+Use `--operation-delay` to control the pause *between* narration and command
+operations (default `700ms`, allowed `0s` through `30s`). Explicit
+`typing="35ms"` on a terminal fence still controls character-by-character input.
+
+```sh
+./mcp-term export-asciinema --lab bound.md --log session.jsonl \
+  --output polished.cast --theme github-dark --operation-delay 1s
+```
+
+This option applies only to Markdown-bound walkthrough exports; plain JSONL
+exports retain their existing timing. The exported file remains asciinema v2.

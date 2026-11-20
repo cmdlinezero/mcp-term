@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/cmdlinezero/mcp-term/internal"
 	"github.com/spf13/cobra"
@@ -70,6 +71,7 @@ func newRoot() *cobra.Command {
 	var exportLog, exportOutput, exportLab string
 	var exportShowExitCode, exportNoHighlight bool
 	var exportTheme string
+	var exportOperationDelay time.Duration
 	export := &cobra.Command{Use: "export-asciinema", Short: "Export recorded JSONL to asciicast v2 without executing commands", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
 		a, err := filepath.Abs(exportLog)
 		if err != nil {
@@ -92,10 +94,11 @@ func newRoot() *cobra.Command {
 			return fmt.Errorf("--theme requires --lab (bound Markdown)")
 		}
 		if exportLab != "" {
-			return internal.ExportWalkthroughCastThemed(exportLab, a, b, exportTheme, exportShowExitCode)
+			return internal.ExportWalkthroughCastPolished(exportLab, a, b, exportTheme, internal.WalkthroughPresentation{OperationDelay: exportOperationDelay}, exportShowExitCode)
 		}
 		return internal.ExportAsciicast(a, b, exportShowExitCode)
 	}}
+	export.Flags().DurationVar(&exportOperationDelay, "operation-delay", 700*time.Millisecond, "Pause between walkthrough operations (0s–30s; --lab only)")
 	export.Flags().StringVar(&exportLab, "lab", "", "Bound Markdown lab for annotated walkthrough export")
 	export.Flags().StringVar(&exportTheme, "theme", "", "Built-in highlighting theme: dracula, monokai, github-dark (default: plain)")
 	export.Flags().BoolVar(&exportNoHighlight, "no-highlight", false, "Disable command syntax highlighting")

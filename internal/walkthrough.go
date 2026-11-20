@@ -17,6 +17,7 @@ type WalkthroughItem struct {
 	Text        string
 	Record      *CommandLog
 	TypingDelay time.Duration
+	SourceFile  string
 }
 
 var (
@@ -106,7 +107,11 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 						return nil, fmt.Errorf("line %d: invalid typing duration %q", startLine, attr[1])
 					}
 				}
-				items = append(items, WalkthroughItem{Record: &copyRecord, TypingDelay: delay})
+				sourceFile := ""
+				if m[2] != "bash" && m[2] != "sh" {
+					sourceFile = destAttr.FindStringSubmatch(fenceAttrs(m))[1]
+				}
+				items = append(items, WalkthroughItem{Record: &copyRecord, TypingDelay: delay, SourceFile: sourceFile})
 				continue
 			}
 			script = append(script, line)
@@ -144,7 +149,20 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 	return WriteWalkthroughCastThemed(w, items, "", showExitCode...)
 }
 
+// WalkthroughPresentation controls only generated cast events, never recordings.
+type WalkthroughPresentation struct {
+	OperationDelay time.Duration
+}
+
 func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme string, showExitCode ...bool) error {
+	return WriteWalkthroughCastPolished(w, items, theme, WalkthroughPresentation{OperationDelay: 700 * time.Millisecond}, showExitCode...)
+}
+
+// WriteWalkthroughCastPolished renders bound Markdown with explicit inter-operation pacing.
+func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme string, presentation WalkthroughPresentation, showExitCode ...bool) error {
+	if presentation.OperationDelay < 0 || presentation.OperationDelay > 30*time.Second {
+		return fmt.Errorf("operation delay must be between 0 and 30s")
+	}
 	if err := ValidateHighlightTheme(theme); err != nil {
 		return err
 	}
@@ -165,25 +183,51 @@ func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme stri
 	}
 	elapsed := 0.0
 	emit := func(s string) error {
-		err := writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(s)})
-		elapsed += 0.7
-		return err
+		return writeCastJSON(bw, []any{elapsed, "o", normalizeTerminal(s)})
 	}
+	// Directory context is inferred only from successful, simple standalone cd commands.
+	// No initial directory is invented: the prompt remains "$ " until known.
+	cwd := ""
+	advance := func() { elapsed += presentation.OperationDelay.Seconds() }
 	for _, item := range items {
 		if item.Record == nil {
 			if err := emit("\r\n" + item.Text + "\r\n"); err != nil {
 				return err
 			}
+			advance()
 			continue
 		}
 		e := item.Record
-		highlighted := HighlightCastInput(recordedScript(*e), theme)
+		script := recordedScript(*e)
+		if item.SourceFile != "" {
+			// Source-file operations have a visible destination, not a misleading shell prompt.
+			if err := emit("\r\n[write file: " + item.SourceFile + "]\r\n"); err != nil {
+				return err
+			}
+			script = strings.TrimPrefix(script, "write-file "+item.SourceFile+"\n")
+		}
+		highlighted := HighlightCastInput(script, theme)
+		// Keep the existing Go syntax mode for file bodies, without displaying the
+		// internal write-file recording representation.
+		if item.SourceFile != "" && theme != "" {
+			colored := HighlightCastInput(recordedScript(*e), theme)
+			if pos := strings.IndexByte(colored, '\n'); pos >= 0 {
+				highlighted = colored[pos+1:]
+			}
+		}
+		prompt := "$ "
+		if cwd != "" {
+			prompt = cwd + " $ "
+		}
+		if item.SourceFile != "" {
+			prompt = ""
+		}
 		if item.TypingDelay <= 0 {
-			if err := emit("\r\n$ " + highlighted + "\r\n"); err != nil {
+			if err := emit("\r\n" + prompt + highlighted + "\r\n"); err != nil {
 				return err
 			}
 		} else {
-			if err := emit("\r\n$ "); err != nil {
+			if err := emit("\r\n" + prompt); err != nil {
 				return err
 			}
 			// ANSI escape sequences do not consume typing time; each visible
@@ -227,6 +271,12 @@ func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme stri
 				return err
 			}
 		}
+		if e.ExitCode == 0 && item.SourceFile == "" {
+			if next, ok := nextWalkthroughDir(cwd, script); ok {
+				cwd = next
+			}
+		}
+		advance()
 	}
 	return bw.Flush()
 }
@@ -238,6 +288,10 @@ func ExportWalkthroughCast(labPath, logPath, output string, showExitCode ...bool
 }
 
 func ExportWalkthroughCastThemed(labPath, logPath, output, theme string, showExitCode ...bool) error {
+	return ExportWalkthroughCastPolished(labPath, logPath, output, theme, WalkthroughPresentation{OperationDelay: 700 * time.Millisecond}, showExitCode...)
+}
+
+func ExportWalkthroughCastPolished(labPath, logPath, output, theme string, presentation WalkthroughPresentation, showExitCode ...bool) error {
 	if err := ValidateHighlightTheme(theme); err != nil {
 		return err
 	}
@@ -264,9 +318,29 @@ func ExportWalkthroughCastThemed(labPath, logPath, output, theme string, showExi
 		return err
 	}
 	defer f.Close()
-	if err := WriteWalkthroughCastThemed(f, items, theme, showExitCode...); err != nil {
+	if err := WriteWalkthroughCastPolished(f, items, theme, presentation, showExitCode...); err != nil {
 		_ = os.Remove(output)
 		return err
 	}
 	return f.Sync()
+}
+
+// nextWalkthroughDir intentionally handles only unambiguous standalone cd paths.
+// Compound shell commands, variables, and home-directory expansion are not guessed.
+func nextWalkthroughDir(current, script string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(script))
+	if len(fields) != 2 || fields[0] != "cd" {
+		return "", false
+	}
+	path := fields[1]
+	if strings.ContainsAny(path, "\"'`$;|&\\") || strings.HasPrefix(path, "~") || path == "-" {
+		return "", false
+	}
+	if filepath.IsAbs(path) {
+		return filepath.Clean(path), true
+	}
+	if current == "" && (path == ".." || strings.HasPrefix(path, "../")) {
+		return "", false
+	}
+	return filepath.Clean(filepath.Join(current, path)), true
 }

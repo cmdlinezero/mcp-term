@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWalkthroughNarrationAndRecordedOutput(t *testing.T) {
@@ -106,5 +107,49 @@ func TestWalkthroughTypingWithThemes(t *testing.T) {
 				t.Fatal("not enough timed events")
 			}
 		})
+	}
+}
+
+func TestWalkthroughPolishPacingSourceAndDirectory(t *testing.T) {
+	cd := sampleCastRecord()
+	cd.Command, cd.Args = "sh", []string{"-c", "cd adk-go-tutorial"}
+	file := sampleCastRecord()
+	file.Command, file.Args = "sh", []string{"-c", "write-file main.go\npackage main\nfunc main() {}"}
+	cmd := sampleCastRecord()
+	cmd.Command, cmd.Args = "sh", []string{"-c", "go run ."}
+	items := []WalkthroughItem{{Record: &cd}, {Record: &file, SourceFile: "main.go"}, {Record: &cmd, TypingDelay: 35 * time.Millisecond}}
+	for _, theme := range []string{"", "dracula", "monokai", "github-dark"} {
+		var b bytes.Buffer
+		if err := WriteWalkthroughCastPolished(&b, items, theme, WalkthroughPresentation{OperationDelay: 200 * time.Millisecond}); err != nil {
+			t.Fatal(err)
+		}
+		text := b.String()
+		for _, want := range []string{"[write file: main.go]", "package", "adk-go-tutorial $ "} {
+			if !strings.Contains(text, want) {
+				t.Fatalf("theme %q missing %q", theme, want)
+			}
+		}
+		if strings.Contains(text, `"$ write-file`) {
+			t.Fatal("source file shown as shell command")
+		}
+		if strings.Count(text, `,"o",`) < 10 {
+			t.Fatal("typing events missing")
+		}
+	}
+	for _, bad := range []time.Duration{-time.Second, 31 * time.Second} {
+		if err := WriteWalkthroughCastPolished(&bytes.Buffer{}, items, "", WalkthroughPresentation{OperationDelay: bad}); err == nil {
+			t.Fatalf("accepted delay %v", bad)
+		}
+	}
+}
+
+func TestWalkthroughDirectoryInferenceConservative(t *testing.T) {
+	for _, script := range []string{"cd", "cd ~", "cd $HOME", "cd ../x", "cd foo && pwd", "cd 'two words'"} {
+		if _, ok := nextWalkthroughDir("", script); ok {
+			t.Fatalf("inferred ambiguous path: %q", script)
+		}
+	}
+	if got, ok := nextWalkthroughDir("project", "cd src"); !ok || got != "project/src" {
+		t.Fatalf("got %q, %v", got, ok)
 	}
 }
