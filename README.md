@@ -404,3 +404,26 @@ controlled by `--operation-delay`.
 
 These are read-only export options. JSONL, recorded outputs, and asciinema v2
 compatibility are preserved.
+
+### CHANGE-013: Tutorial and demo presentation modes
+
+Bound walkthrough exports support `--presentation tutorial|demo` (default:
+`tutorial`). Tutorial mode preserves the existing narration and recorded
+operations and also renders fenced `info`, `warn`, and `hint` callouts with
+readable `INFO:`, `WARN:`, and `HINT:` prefixes. When a highlighting theme is
+selected, prefixes use green, red, and cyan respectively; without a theme,
+the prefixes remain plain text.
+
+Demo mode retains the document title, step labels and task headings that
+contain recorded terminal operations, plus the commands, source-file blocks,
+recorded output, and warning callouts. It omits explanatory prose, info/hint
+callouts, and sections without recorded operations. Existing step shortcodes
+and Markdown headings provide the structure; no additional task markers are
+required. Playback controls and immutable JSONL are unchanged.
+
+```sh
+./mcp-term export-asciinema --lab bound.md --log session.jsonl \
+  --output tutorial.cast --presentation tutorial --theme github-dark
+./mcp-term export-asciinema --lab bound.md --log session.jsonl \
+  --output demo.cast --presentation demo --theme github-dark
+```

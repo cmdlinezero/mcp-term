@@ -18,6 +18,7 @@ type WalkthroughItem struct {
 	Record      *CommandLog
 	TypingDelay time.Duration
 	SourceFile  string
+	Kind        string // step, task, narration, info, warn, hint
 }
 
 var (
@@ -68,7 +69,16 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 			if strings.HasPrefix(trim, fenceMarker) && strings.Trim(trim, "` ") == "" {
 				inFence = false
 				m := fenceStart.FindStringSubmatch(opening + "\n")
-				if m == nil || !terminalAttr.MatchString(fenceAttrs(m)) {
+				if m == nil {
+					continue
+				}
+				if !terminalAttr.MatchString(fenceAttrs(m)) {
+					if kind := strings.ToLower(m[2]); kind == "info" || kind == "warn" || kind == "hint" {
+						body := strings.TrimSpace(strings.Join(script, "\n"))
+						if body != "" {
+							items = append(items, WalkthroughItem{Text: body, Kind: kind})
+						}
+					}
 					continue
 				}
 				id := boundID.FindStringSubmatch(fenceAttrs(m))
@@ -118,20 +128,26 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 			continue
 		}
 		if match := stepStart.FindStringSubmatch(line); match != nil {
-			items = append(items, WalkthroughItem{Text: "\n=== " + match[1] + " ===\n"})
+			items = append(items, WalkthroughItem{Text: "\n=== " + match[1] + " ===\n", Kind: "step"})
 			continue
 		}
 		if trim == "" || strings.HasPrefix(trim, "{{<") || strings.HasPrefix(trim, "<!--") || strings.HasPrefix(trim, "-->") {
 			continue
 		}
+		kind := "narration"
+		if strings.HasPrefix(trim, "### ") {
+			kind = "task"
+		}
 		if strings.HasPrefix(trim, "#") {
 			trim = strings.TrimSpace(strings.TrimLeft(trim, "#"))
 		}
-		trim = listPrefix.ReplaceAllString(trim, "")
+		if kind != "task" {
+			trim = listPrefix.ReplaceAllString(trim, "")
+		}
 		trim = markdownLink.ReplaceAllString(trim, "$1")
 		trim = markdownInline.ReplaceAllString(trim, "")
 		if trim != "" {
-			items = append(items, WalkthroughItem{Text: trim})
+			items = append(items, WalkthroughItem{Text: trim, Kind: kind})
 		}
 	}
 	if inFence {
@@ -154,6 +170,7 @@ type WalkthroughPresentation struct {
 	OperationDelay  time.Duration
 	SourceLineDelay time.Duration // Optional line-by-line source reveal; zero displays immediately.
 	Title           string        // Optional terminal header title.
+	Mode            string        // tutorial (default) or demo.
 }
 
 func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme string, showExitCode ...bool) error {
@@ -169,6 +186,11 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		return fmt.Errorf("source line delay must be between 0 and 30s")
 	}
 	if err := ValidateHighlightTheme(theme); err != nil {
+		return err
+	}
+	var err error
+	items, err = selectWalkthroughItems(items, presentation.Mode)
+	if err != nil {
 		return err
 	}
 	bw := bufio.NewWriter(w)
@@ -207,7 +229,26 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 	advance := func() { elapsed += presentation.OperationDelay.Seconds() }
 	for _, item := range items {
 		if item.Record == nil {
-			if err := emit("\r\n" + item.Text + "\r\n"); err != nil {
+			text := item.Text
+			switch item.Kind {
+			case "info", "warn", "hint":
+				prefix, color := "INFO", "\x1b[32m"
+				if item.Kind == "warn" {
+					prefix, color = "WARN", "\x1b[31m"
+				}
+				if item.Kind == "hint" {
+					prefix, color = "HINT", "\x1b[36m"
+				}
+				if theme == "" {
+					color = ""
+				}
+				reset := ""
+				if color != "" {
+					reset = "\x1b[0m"
+				}
+				text = color + prefix + reset + ": " + text
+			}
+			if err := emit("\r\n" + text + "\r\n"); err != nil {
 				return err
 			}
 			advance()
@@ -398,4 +439,44 @@ func nextWalkthroughDir(current, script string) (string, bool) {
 		return "", false
 	}
 	return filepath.Clean(filepath.Join(current, path)), true
+}
+
+// selectWalkthroughItems keeps the full authored walkthrough by default. Demo
+// retains only executable steps, their immediately preceding task headings,
+// and warnings. It never changes the recorded operations or their order.
+func selectWalkthroughItems(items []WalkthroughItem, mode string) ([]WalkthroughItem, error) {
+	if mode == "" || mode == "tutorial" {
+		return items, nil
+	}
+	if mode != "demo" {
+		return nil, fmt.Errorf("invalid presentation mode %q (use tutorial or demo)", mode)
+	}
+	keep := make([]bool, len(items))
+	lastStep, lastTask := -1, -1
+	for i, item := range items {
+		switch item.Kind {
+		case "step":
+			lastStep, lastTask = i, -1
+		case "task":
+			lastTask = i
+		case "warn":
+			keep[i] = true
+		}
+		if item.Record != nil {
+			keep[i] = true
+			if lastStep >= 0 {
+				keep[lastStep] = true
+			}
+			if lastTask >= 0 {
+				keep[lastTask] = true
+			}
+		}
+	}
+	selected := make([]WalkthroughItem, 0, len(items))
+	for i, item := range items {
+		if keep[i] {
+			selected = append(selected, item)
+		}
+	}
+	return selected, nil
 }

@@ -190,3 +190,56 @@ func TestWalkthroughFinalPresentation(t *testing.T) {
 		}
 	}
 }
+
+func TestWalkthroughPresentationModesAndCallouts(t *testing.T) {
+	e := sampleCastRecord()
+	e.Command, e.Args = "sh", []string{"-c", "echo hello"}
+	lab := `---
+title: Example
+---
+{{< step label="Setup" >}}
+Narrative paragraph.
+### 1. Run command
+` + "```info\nInfo content\n```\n```hint\nHint content\n```\n```warn\nDo not publish secrets\n```\n```bash {terminal=true file-id=\"session.jsonl\" command-id=\"abc\"}\necho hello\n```\n" + `### Patterns observed
+Additional commentary.
+{{< /step >}}
+{{< step label="Conclusion" >}}
+No executable content.
+{{< /step >}}
+`
+	items, err := ParseWalkthrough([]byte(lab), []CommandLog{e}, "session.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		mode         string
+		want, absent []string
+	}{
+		{"tutorial", []string{"Setup", "1. Run command", "Narrative paragraph", "INFO", "WARN", "HINT", "Info content", "Hint content", "Do not publish secrets", "Conclusion"}, nil},
+		{"demo", []string{"Setup", "1. Run command", "echo", "WARN", "Do not publish secrets"}, []string{"Narrative paragraph", "INFO", "HINT", "Info content", "Hint content", "Patterns observed", "Conclusion"}},
+	} {
+		for _, theme := range []string{"", "github-dark"} {
+			var b bytes.Buffer
+			if err := WriteWalkthroughCastPolished(&b, items, theme, WalkthroughPresentation{Mode: tc.mode}); err != nil {
+				t.Fatal(err)
+			}
+			text := b.String()
+			for _, v := range tc.want {
+				if !strings.Contains(text, v) {
+					t.Errorf("%s %s: missing %q", tc.mode, theme, v)
+				}
+			}
+			for _, v := range tc.absent {
+				if strings.Contains(text, v) {
+					t.Errorf("%s %s: unexpected %q", tc.mode, theme, v)
+				}
+			}
+			if theme == "" && strings.Contains(text, "\\u001b[32mINFO") {
+				t.Error("colored callout in plain mode")
+			}
+		}
+	}
+	if _, err := selectWalkthroughItems(items, "unknown"); err == nil {
+		t.Fatal("unknown mode accepted")
+	}
+}
