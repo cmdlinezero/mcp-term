@@ -169,6 +169,7 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 type WalkthroughPresentation struct {
 	OperationDelay  time.Duration
 	SourceLineDelay time.Duration // Optional line-by-line source reveal; zero displays immediately.
+	SourceReveal    string        // "" or "lines" (legacy), "smooth" (GIF-friendly chunks).
 	Title           string        // Optional terminal header title.
 	Mode            string        // tutorial (default) or demo.
 }
@@ -184,6 +185,9 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 	}
 	if presentation.SourceLineDelay < 0 || presentation.SourceLineDelay > 30*time.Second {
 		return fmt.Errorf("source line delay must be between 0 and 30s")
+	}
+	if presentation.SourceReveal != "" && presentation.SourceReveal != "lines" && presentation.SourceReveal != "smooth" {
+		return fmt.Errorf("invalid source reveal %q (use lines or smooth)", presentation.SourceReveal)
 	}
 	if err := ValidateHighlightTheme(theme); err != nil {
 		return err
@@ -246,7 +250,12 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 				if color != "" {
 					reset = "\x1b[0m"
 				}
-				text = color + prefix + reset + ": " + text
+				// Printable delimiters remain visible in uncolored exports and GIFs.
+				header := "── " + prefix + " ──"
+				// Fixed, compact framing: half of the 100-column cast width,
+				// capped at 40 columns. Never grow with callout content.
+				const ruleWidth = 40
+				text = color + header + reset + "\r\n" + text + "\r\n" + color + strings.Repeat("─", ruleWidth) + reset
 			}
 			if err := emit("\r\n" + text + "\r\n"); err != nil {
 				return err
@@ -279,7 +288,24 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		if item.SourceFile != "" {
 			prompt = ""
 		}
-		if item.SourceFile != "" && presentation.SourceLineDelay > 0 {
+		if item.SourceFile != "" && presentation.SourceReveal == "smooth" {
+			if err := emit("\r\n"); err != nil {
+				return err
+			}
+			// Short bursts yield more GIF frames than whole-line events.
+			// Keep ANSI SGR escapes intact and never split UTF-8 runes.
+			for _, chunk := range smoothSourceChunks(highlighted, 8) {
+				if err := emit(chunk); err != nil {
+					return err
+				}
+				elapsed += 0.025
+			}
+			if !strings.HasSuffix(highlighted, "\n") {
+				if err := emit("\r\n"); err != nil {
+					return err
+				}
+			}
+		} else if item.SourceFile != "" && presentation.SourceLineDelay > 0 {
 			if err := emit("\r\n"); err != nil {
 				return err
 			}
@@ -366,6 +392,46 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		advance()
 	}
 	return bw.Flush()
+}
+
+// smoothSourceChunks preserves terminal color sequences while revealing a source
+// file in short bursts. A newline ends the current chunk so terminal wrapping
+// and line breaks remain faithful to the original source.
+func smoothSourceChunks(source string, maxRunes int) []string {
+	var chunks []string
+	var current strings.Builder
+	visible := 0
+	flush := func() {
+		if current.Len() > 0 {
+			chunks = append(chunks, current.String())
+			current.Reset()
+			visible = 0
+		}
+	}
+	for len(source) > 0 {
+		if source[0] == '\x1b' {
+			end := strings.IndexByte(source, 'm')
+			if end >= 0 {
+				current.WriteString(source[:end+1])
+				source = source[end+1:]
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(source)
+		source = source[size:]
+		if r == '\n' {
+			current.WriteString("\r\n")
+			flush()
+			continue
+		}
+		current.WriteRune(r)
+		visible++
+		if visible >= maxRunes {
+			flush()
+		}
+	}
+	flush()
+	return chunks
 }
 
 // ExportWalkthroughCast exclusively creates a read-only demo from bound Markdown

@@ -243,3 +243,30 @@ No executable content.
 		t.Fatal("unknown mode accepted")
 	}
 }
+
+func TestWalkthroughFramedCalloutsAndSmoothSource(t *testing.T) {
+	e := sampleCastRecord()
+	e.Command, e.Args = "sh", []string{"-c", "write-file main.go\npackage main\nfunc main() {}"}
+	items := []WalkthroughItem{{Kind: "info", Text: "Helpful context"}, {Kind: "warn", Text: "Keep secrets private"}, {Kind: "hint", Text: "Try locally"}, {Record: &e, SourceFile: "main.go"}}
+	for _, theme := range []string{"", "github-dark"} {
+		var b bytes.Buffer
+		if err := WriteWalkthroughCastPolished(&b, items, theme, WalkthroughPresentation{SourceReveal: "smooth"}); err != nil {
+			t.Fatal(err)
+		}
+		for _, want := range []string{"── INFO ──", "── WARN ──", "── HINT ──", strings.Repeat("─", 40), "Helpful context", "Keep secrets private"} {
+			if !strings.Contains(b.String(), want) {
+				t.Errorf("theme %q missing %q", theme, want)
+			}
+		}
+		if strings.Count(b.String(), `,"o",`) < 12 {
+			t.Errorf("theme %q: missing source chunks", theme)
+		}
+	}
+	if err := WriteWalkthroughCastPolished(&bytes.Buffer{}, items, "", WalkthroughPresentation{SourceReveal: "unknown"}); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+	chunks := smoothSourceChunks("\x1b[31m日本語\x1b[0m\nhello", 2)
+	if len(chunks) < 3 || !strings.Contains(strings.Join(chunks, ""), "日本語") {
+		t.Fatalf("corrupt chunks: %#v", chunks)
+	}
+}

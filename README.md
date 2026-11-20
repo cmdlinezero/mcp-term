@@ -427,3 +427,22 @@ required. Playback controls and immutable JSONL are unchanged.
 ./mcp-term export-asciinema --lab bound.md --log session.jsonl \
   --output demo.cast --presentation demo --theme github-dark
 ```
+
+### GIF-friendly source reveal and framed callouts (CHANGE-014)
+
+Bound Markdown `info`, `warn`, and `hint` fences are presented with clear
+printable top and bottom borders. Demo mode still retains warnings only.
+
+For smoother source-code reveal when converting casts with `agg`, use:
+
+```sh
+mcp-term export-asciinema --lab tutorial-bound.md --log session.jsonl \
+  --output tutorial-smooth.cast --presentation tutorial --theme github-dark \
+  --source-reveal smooth
+agg tutorial-smooth.cast tutorial-smooth.gif
+```
+
+`--source-reveal lines` remains the default and retains the existing
+`--source-line-delay` behavior. Smooth mode emits small source chunks with
+25ms event spacing; it does not change recorded stdout/stderr or the GIF
+renderer frame rate.
