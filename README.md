@@ -5,6 +5,38 @@
 
 **Record once. Replay anywhere.**
 
+## See TermCast MCP in action
+
+![TermCast MCP: Markdown to GIF](screenshots/mcp-term-self-demo.gif)
+
+The [self-demonstrating walkthrough](examples/mcp-term-self-demo.md) records
+commands to JSONL, binds Markdown to the recording, exports an asciinema cast
+with the `github-dark` theme, and converts it to a GIF with `agg`.
+
+From the repository root, with `./mcp-term`, `python3`, and `agg` available:
+
+```bash
+./mcp-term lab-import \
+  --input examples/mcp-term-self-demo.md \
+  --log mcp-term-self-demo.jsonl \
+  --output mcp-term-self-demo-bound.md
+
+./mcp-term export-asciinema \
+  --lab mcp-term-self-demo-bound.md \
+  --log mcp-term-self-demo.jsonl \
+  --output mcp-term-self-demo.cast \
+  --presentation tutorial \
+  --theme github-dark \
+  --source-reveal smooth
+
+agg --font-size 64 mcp-term-self-demo.cast screenshots/mcp-term-self-demo.gif
+```
+
+**Warning:** `lab-import` executes the Markdown's terminal commands. Review
+it before running. The example writes into `termcast-demo/`; remove that
+folder before rerunning if you want a fresh demonstration. The GIF is generated
+locally and should be committed under `screenshots/`.
+
 TermCast MCP is a Go Model Context Protocol (MCP) stdio terminal server. Its `mcp-term` executable runs commands, captures stdout, stderr, exit status and duration in append-only JSONL, and supports both command re-execution and read-only asciinema-compatible playback export.
 
 **Repository:** https://github.com/cmdlinezero/mcp-term
@@ -341,12 +373,6 @@ created exclusively and existing files are never overwritten.
 
 Exit-code markers are omitted from both raw and lab-aware casts by default. Use `--show-exit-code` with `export-asciinema` to display them when demonstrating failures.
 
-## License
-
-TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
-
-
-
 ### CHANGE-010: Built-in walkthrough syntax themes
 
 Use `--theme dracula`, `--theme monokai`, or `--theme github-dark` with
@@ -446,3 +472,11 @@ agg tutorial-smooth.cast tutorial-smooth.gif
 `--source-line-delay` behavior. Smooth mode emits small source chunks with
 25ms event spacing; it does not change recorded stdout/stderr or the GIF
 renderer frame rate.
+
+
+## License
+
+TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
+
+
+
