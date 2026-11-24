@@ -2,10 +2,37 @@ package internal
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
+
+// castVisibleText reconstructs output across timed asciinema events.
+func castVisibleText(t *testing.T, data []byte) string {
+	t.Helper()
+	var result strings.Builder
+	lines := bytes.Split(data, []byte("\n"))
+	for _, line := range lines[1:] {
+		if len(line) == 0 {
+			continue
+		}
+		var event []json.RawMessage
+		if err := json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		if len(event) != 3 {
+			t.Fatalf("invalid cast event: %s", line)
+		}
+		var content string
+		if err := json.Unmarshal(event[2], &content); err != nil {
+			t.Fatal(err)
+		}
+		result.WriteString(content)
+	}
+	return result.String()
+}
 
 func TestWalkthroughNarrationAndRecordedOutput(t *testing.T) {
 	e := sampleCastRecord()
@@ -29,12 +56,12 @@ Explain the command before running it.
 		t.Fatal(err)
 	}
 	for _, s := range []string{"First step", "Explain the command", "Show the result", "echo hello", "recorded hello"} {
-		if !strings.Contains(b.String(), s) {
+		if !strings.Contains(castVisibleText(t, b.Bytes()), s) {
 			t.Errorf("missing %q", s)
 		}
 	}
 	for _, s := range []string{"graph TD", "title: Test"} {
-		if strings.Contains(b.String(), s) {
+		if strings.Contains(castVisibleText(t, b.Bytes()), s) {
 			t.Errorf("unexpected %q", s)
 		}
 	}
@@ -123,7 +150,7 @@ func TestWalkthroughPolishPacingSourceAndDirectory(t *testing.T) {
 		if err := WriteWalkthroughCastPolished(&b, items, theme, WalkthroughPresentation{OperationDelay: 200 * time.Millisecond}); err != nil {
 			t.Fatal(err)
 		}
-		text := b.String()
+		text := castVisibleText(t, b.Bytes())
 		for _, want := range []string{"── main.go ──", "package", "adk-go-tutorial $ "} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("theme %q missing %q", theme, want)
@@ -132,7 +159,7 @@ func TestWalkthroughPolishPacingSourceAndDirectory(t *testing.T) {
 		if strings.Contains(text, `"$ write-file`) {
 			t.Fatal("source file shown as shell command")
 		}
-		if strings.Count(text, `,"o",`) < 10 {
+		if strings.Count(b.String(), `,"o",`) < 10 {
 			t.Fatal("typing events missing")
 		}
 	}
@@ -168,7 +195,7 @@ func TestWalkthroughFinalPresentation(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		text := b.String()
+		text := castVisibleText(t, b.Bytes())
 		for _, want := range []string{"ADK Lab", "── main.go ──", "✓ done", "✗ failed", "── main.go ──"} {
 			if !strings.Contains(text, want) {
 				t.Fatalf("theme %q missing %q", theme, want)
@@ -180,7 +207,7 @@ func TestWalkthroughFinalPresentation(t *testing.T) {
 		if strings.Contains(text, "[exit 7]") {
 			t.Fatal("numeric exit code visible by default")
 		}
-		if strings.Count(text, `,"o",`) < 20 {
+		if strings.Count(b.String(), `,"o",`) < 20 {
 			t.Fatal("missing progressive events")
 		}
 	}
@@ -223,7 +250,7 @@ No executable content.
 			if err := WriteWalkthroughCastPolished(&b, items, theme, WalkthroughPresentation{Mode: tc.mode}); err != nil {
 				t.Fatal(err)
 			}
-			text := b.String()
+			text := castVisibleText(t, b.Bytes())
 			for _, v := range tc.want {
 				if !strings.Contains(text, v) {
 					t.Errorf("%s %s: missing %q", tc.mode, theme, v)
@@ -268,5 +295,108 @@ func TestWalkthroughFramedCalloutsAndSmoothSource(t *testing.T) {
 	chunks := smoothSourceChunks("\x1b[31m日本語\x1b[0m\nhello", 2)
 	if len(chunks) < 3 || !strings.Contains(strings.Join(chunks, ""), "日本語") {
 		t.Fatalf("corrupt chunks: %#v", chunks)
+	}
+}
+
+func TestWalkthroughTypingPrecedenceAndSpacing(t *testing.T) {
+	e := sampleCastRecord()
+	e.Command, e.Args = "sh", []string{"-c", "echo hi"}
+	for _, tc := range []struct {
+		name      string
+		attribute string
+		override  *time.Duration
+		expected  float64
+	}{
+		{name: "default", expected: .05},
+		{name: "markdown", attribute: ` typing="35ms"`, expected: .035},
+		{name: "markdown zero", attribute: ` typing="0s"`, expected: 0},
+		{name: "cli override", attribute: ` typing="35ms"`, override: durationPtr(10 * time.Millisecond), expected: .01},
+		{name: "cli zero", attribute: ` typing="35ms"`, override: durationPtr(0), expected: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			lab := "```bash {terminal=true file-id=\"session.jsonl\" command-id=\"abc\"" + tc.attribute + "}\necho hi\n```\n"
+			items, err := ParseWalkthrough([]byte(lab), []CommandLog{e}, "session.jsonl")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var b bytes.Buffer
+			if err := WriteWalkthroughCastPolished(&b, items, "", WalkthroughPresentation{TypingOverride: tc.override}); err != nil {
+				t.Fatal(err)
+			}
+			lines := bytes.Split(bytes.TrimSpace(b.Bytes()), []byte("\n"))
+			var promptTime, firstTime, secondTime float64
+			foundPrompt, foundFirst, foundSecond := false, false, false
+			for _, line := range lines[1:] {
+				var event []json.RawMessage
+				if err := json.Unmarshal(line, &event); err != nil {
+					t.Fatal(err)
+				}
+				var tm float64
+				var content string
+				if err := json.Unmarshal(event[0], &tm); err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(event[2], &content); err != nil {
+					t.Fatal(err)
+				}
+				if strings.Contains(content, "\r\n\r\n$ ") {
+					foundPrompt = true
+					promptTime = tm
+				}
+				if content == "e" && !foundFirst {
+					foundFirst = true
+					firstTime = tm
+				}
+				if content == "c" && !foundSecond {
+					foundSecond = true
+					secondTime = tm
+				}
+			}
+			if tc.expected == 0 {
+				if foundFirst || !strings.Contains(castVisibleText(t, b.Bytes()), "\r\n\r\n$ echo hi") {
+					t.Fatal("zero delay must render command immediately after blank line")
+				}
+			} else {
+				if !foundPrompt || !foundFirst || !foundSecond {
+					t.Fatal("missing typing events or blank line before prompt")
+				}
+				if diff := secondTime - firstTime; diff < tc.expected-0.000001 || diff > tc.expected+0.000001 {
+					t.Fatalf("typing interval %v, want %v", diff, tc.expected)
+				}
+				if promptTime > firstTime {
+					t.Fatal("prompt after typing")
+				}
+			}
+		})
+	}
+}
+
+func durationPtr(d time.Duration) *time.Duration { return &d }
+
+func TestMultilineContinuationAndCalloutWrap(t *testing.T) {
+	e := sampleCastRecord()
+	e.Command, e.Args = "sh", []string{"-c", "export A=1\nexport B=2\nexport C=3"}
+	lab := "```bash {terminal=true file-id=\"session.jsonl\" command-id=\"abc\"}\nexport A=1\nexport B=2\nexport C=3\n```\n"
+	items, err := ParseWalkthrough([]byte(lab), []CommandLog{e}, "session.jsonl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, delay := range []time.Duration{0, 50 * time.Millisecond} {
+		var b bytes.Buffer
+		if err := WriteWalkthroughCastPolished(&b, items, "", WalkthroughPresentation{TypingOverride: durationPtr(delay)}); err != nil {
+			t.Fatal(err)
+		}
+		visible := castVisibleText(t, b.Bytes())
+		for _, expected := range []string{"$ export A=1", "\r\n> export B=2", "\r\n> export C=3"} {
+			if !strings.Contains(visible, expected) {
+				t.Fatalf("delay %v: missing %q in %q", delay, expected, visible)
+			}
+		}
+	}
+	wrapped := wrapCallout(strings.Repeat("longword", 30)+"\nshort text", 100)
+	for _, line := range strings.Split(wrapped, "\r\n") {
+		if utf8.RuneCountInString(line) > 100 {
+			t.Fatalf("unwrapped line: %q", line)
+		}
 	}
 }

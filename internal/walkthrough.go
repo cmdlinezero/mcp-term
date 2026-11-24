@@ -17,6 +17,7 @@ type WalkthroughItem struct {
 	Text        string
 	Record      *CommandLog
 	TypingDelay time.Duration
+	TypingSet   bool // True when Markdown explicitly sets typing, including 0s.
 	SourceFile  string
 	Kind        string // step, task, narration, info, warn, hint
 }
@@ -110,10 +111,12 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 				used[id[1]] = true
 				copyRecord := e
 				var delay time.Duration
+				typingSet := false
 				if attr := typingAttribute.FindStringSubmatch(fenceAttrs(m)); attr != nil {
 					var err error
+					typingSet = true
 					delay, err = time.ParseDuration(attr[1])
-					if err != nil || delay <= 0 {
+					if err != nil || delay < 0 {
 						return nil, fmt.Errorf("line %d: invalid typing duration %q", startLine, attr[1])
 					}
 				}
@@ -121,7 +124,7 @@ func ParseWalkthrough(data []byte, entries []CommandLog, logPath string) ([]Walk
 				if m[2] != "bash" && m[2] != "sh" {
 					sourceFile = destAttr.FindStringSubmatch(fenceAttrs(m))[1]
 				}
-				items = append(items, WalkthroughItem{Record: &copyRecord, TypingDelay: delay, SourceFile: sourceFile})
+				items = append(items, WalkthroughItem{Record: &copyRecord, TypingDelay: delay, TypingSet: typingSet, SourceFile: sourceFile})
 				continue
 			}
 			script = append(script, line)
@@ -168,10 +171,12 @@ func WriteWalkthroughCast(w io.Writer, items []WalkthroughItem, showExitCode ...
 // WalkthroughPresentation controls only generated cast events, never recordings.
 type WalkthroughPresentation struct {
 	OperationDelay  time.Duration
-	SourceLineDelay time.Duration // Optional line-by-line source reveal; zero displays immediately.
-	SourceReveal    string        // "" or "lines" (legacy), "smooth" (GIF-friendly chunks).
-	Title           string        // Optional terminal header title.
-	Mode            string        // tutorial (default) or demo.
+	TypingSpeed     time.Duration  // Default typing delay; zero uses 25ms.
+	TypingOverride  *time.Duration // CLI override; explicit zero disables animation.
+	SourceLineDelay time.Duration  // Optional line-by-line source reveal; zero displays immediately.
+	SourceReveal    string         // "" or "lines" (legacy), "smooth" (GIF-friendly chunks).
+	Title           string         // Optional terminal header title.
+	Mode            string         // tutorial (default) or demo.
 }
 
 func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme string, showExitCode ...bool) error {
@@ -180,6 +185,12 @@ func WriteWalkthroughCastThemed(w io.Writer, items []WalkthroughItem, theme stri
 
 // WriteWalkthroughCastPolished renders bound Markdown with explicit inter-operation pacing.
 func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme string, presentation WalkthroughPresentation, showExitCode ...bool) error {
+	if presentation.TypingSpeed < 0 || presentation.TypingSpeed > 30*time.Second {
+		return fmt.Errorf("typing speed must be between 0 and 30s")
+	}
+	if presentation.TypingOverride != nil && (*presentation.TypingOverride < 0 || *presentation.TypingOverride > 30*time.Second) {
+		return fmt.Errorf("typing override must be between 0 and 30s")
+	}
 	if presentation.OperationDelay < 0 || presentation.OperationDelay > 30*time.Second {
 		return fmt.Errorf("operation delay must be between 0 and 30s")
 	}
@@ -255,7 +266,7 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 				// Fixed, compact framing: half of the 100-column cast width,
 				// capped at 40 columns. Never grow with callout content.
 				const ruleWidth = 40
-				text = color + header + reset + "\r\n" + text + "\r\n" + color + strings.Repeat("─", ruleWidth) + reset
+				text = color + header + reset + "\r\n" + wrapCallout(text, 100) + "\r\n" + color + strings.Repeat("─", ruleWidth) + reset
 			}
 			if err := emit("\r\n" + text + "\r\n"); err != nil {
 				return err
@@ -264,10 +275,20 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 			continue
 		}
 		e := item.Record
+		typingDelay := 50 * time.Millisecond
+		if presentation.TypingSpeed != 0 {
+			typingDelay = presentation.TypingSpeed
+		}
+		if item.TypingSet || item.TypingDelay != 0 {
+			typingDelay = item.TypingDelay
+		}
+		if presentation.TypingOverride != nil {
+			typingDelay = *presentation.TypingOverride
+		}
 		script := recordedScript(*e)
 		if item.SourceFile != "" {
 			// Source-file operations have a visible destination, not a misleading shell prompt.
-			if err := emit("\r\n\x1b[2m── " + item.SourceFile + " ──\x1b[0m\r\n"); err != nil {
+			if err := emit("\r\n\r\n\x1b[2m── " + item.SourceFile + " ──\x1b[0m\r\n"); err != nil {
 				return err
 			}
 			script = strings.TrimPrefix(script, "write-file "+item.SourceFile+"\n")
@@ -288,6 +309,7 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		if item.SourceFile != "" {
 			prompt = ""
 		}
+		continuation := strings.Repeat(" ", max(0, utf8.RuneCountInString(prompt)-2)) + "> "
 		if item.SourceFile != "" && presentation.SourceReveal == "smooth" {
 			if err := emit("\r\n"); err != nil {
 				return err
@@ -324,12 +346,12 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 					return err
 				}
 			}
-		} else if item.TypingDelay <= 0 {
-			if err := emit("\r\n" + prompt + highlighted + "\r\n"); err != nil {
+		} else if typingDelay <= 0 {
+			if err := emit("\r\n\r\n" + prompt + continuationLines(highlighted, continuation) + "\r\n"); err != nil {
 				return err
 			}
 		} else {
-			if err := emit("\r\n" + prompt); err != nil {
+			if err := emit("\r\n\r\n" + prompt); err != nil {
 				return err
 			}
 			// ANSI SGR sequences are instantaneous; visible runes consume typing time.
@@ -350,11 +372,14 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 				chunk := highlighted[:width]
 				if r == '\n' {
 					chunk = "\r\n"
+					if len(highlighted) > width {
+						chunk += continuation
+					}
 				}
 				if err := writeCastJSON(bw, []any{elapsed, "o", chunk}); err != nil {
 					return err
 				}
-				elapsed += item.TypingDelay.Seconds()
+				elapsed += typingDelay.Seconds()
 				highlighted = highlighted[width:]
 			}
 			if err := emit("\r\n"); err != nil {
@@ -368,6 +393,11 @@ func WriteWalkthroughCastPolished(w io.Writer, items []WalkthroughItem, theme st
 		}
 		if e.Stderr != "" {
 			if err := emit(e.Stderr); err != nil {
+				return err
+			}
+		}
+		if e.CompletionReason == "timed_interrupt" {
+			if err := emit("\r\n^C\r\n"); err != nil {
 				return err
 			}
 		}
@@ -545,4 +575,54 @@ func selectWalkthroughItems(items []WalkthroughItem, mode string) ([]Walkthrough
 		}
 	}
 	return selected, nil
+}
+
+// continuationLines adds a visible continuation prompt after each internal
+// command newline, without adding one after the final newline.
+func continuationLines(script, continuation string) string {
+	return strings.ReplaceAll(strings.TrimSuffix(script, "\n"), "\n", "\n"+continuation) + func() string {
+		if strings.HasSuffix(script, "\n") {
+			return "\n"
+		}
+		return ""
+	}()
+}
+
+// wrapCallout wraps authored callout text within the cast's 100-column viewport.
+// Long tokens are split by rune, preserving explicit paragraph breaks.
+func wrapCallout(text string, columns int) string {
+	var result []string
+	for _, line := range strings.Split(strings.ReplaceAll(text, "\r\n", "\n"), "\n") {
+		if line == "" {
+			result = append(result, "")
+			continue
+		}
+		current := ""
+		for _, word := range strings.Fields(line) {
+			for utf8.RuneCountInString(word) > columns {
+				if current != "" {
+					result = append(result, current)
+					current = ""
+				}
+				runes := []rune(word)
+				result = append(result, string(runes[:columns]))
+				word = string(runes[columns:])
+			}
+			if word == "" {
+				continue
+			}
+			if current == "" {
+				current = word
+			} else if utf8.RuneCountInString(current)+1+utf8.RuneCountInString(word) <= columns {
+				current += " " + word
+			} else {
+				result = append(result, current)
+				current = word
+			}
+		}
+		if current != "" {
+			result = append(result, current)
+		}
+	}
+	return strings.Join(result, "\r\n")
 }
