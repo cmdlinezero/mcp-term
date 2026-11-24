@@ -18,15 +18,16 @@ import (
 
 // LabCommand is a terminal-enabled shell fence in a Markdown lab.
 type LabCommand struct {
-	Script    string
-	Step      string
-	Line      int
-	Start     int
-	End       int
-	Opening   string
-	Language  string
-	File      string
-	Overwrite bool
+	Script         string
+	Step           string
+	Line           int
+	Start          int
+	End            int
+	Opening        string
+	Language       string
+	File           string
+	Overwrite      bool
+	InterruptAfter time.Duration
 }
 
 var (
@@ -128,6 +129,9 @@ func ParseLab(data []byte) ([]LabCommand, error) {
 			c.File = m[1]
 			c.Overwrite = overwriteAttr.MatchString(attrs)
 		}
+		if err := parseInterrupt(attrs, &c); err != nil {
+			return nil, fmt.Errorf("line %d: %w", c.Line, err)
+		}
 		commands = append(commands, c)
 		for k := i; k <= j; k++ {
 			offset += len(lines[k])
@@ -187,6 +191,8 @@ func ExecuteLab(ctx context.Context, commands []LabCommand, logger *Logger) ([]C
 		var e CommandLog
 		if c.File != "" {
 			e = writeSource(c, root, cwd)
+		} else if c.InterruptAfter > 0 {
+			e = executeTimed(ctx, c, cwd)
 		} else if next, ok := labCD(c.Script); ok {
 			e = labChangeDir(c, root, cwd, next)
 			if e.ExitCode == 0 {

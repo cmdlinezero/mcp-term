@@ -10,14 +10,16 @@ import (
 )
 
 type CommandLog struct {
-	ID        string   `json:"id"`
-	Timestamp string   `json:"timestamp"`
-	Command   string   `json:"command"`
-	Args      []string `json:"args"`
-	Stdout    string   `json:"stdout"`
-	Stderr    string   `json:"stderr"`
-	ExitCode  int      `json:"exit_code"`
-	Duration  string   `json:"duration"`
+	ProcessExitCode  *int     `json:"process_exit_code,omitempty"`
+	CompletionReason string   `json:"completion_reason,omitempty"`
+	ID               string   `json:"id"`
+	Timestamp        string   `json:"timestamp"`
+	Command          string   `json:"command"`
+	Args             []string `json:"args"`
+	Stdout           string   `json:"stdout"`
+	Stderr           string   `json:"stderr"`
+	ExitCode         int      `json:"exit_code"`
+	Duration         string   `json:"duration"`
 }
 
 type Logger struct {

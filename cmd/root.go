@@ -71,8 +71,8 @@ func newRoot() *cobra.Command {
 	var exportLog, exportOutput, exportLab string
 	var exportShowExitCode, exportNoHighlight bool
 	var exportTheme, exportPresentation, exportSourceReveal string
-	var exportOperationDelay, exportSourceLineDelay time.Duration
-	export := &cobra.Command{Use: "export-asciinema", Short: "Export recorded JSONL to asciicast v2 without executing commands", Args: cobra.NoArgs, RunE: func(_ *cobra.Command, _ []string) error {
+	var exportOperationDelay, exportSourceLineDelay, exportTypingSpeed time.Duration
+	export := &cobra.Command{Use: "export-asciinema", Short: "Export recorded JSONL to asciicast v2 without executing commands", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		a, err := filepath.Abs(exportLog)
 		if err != nil {
 			return err
@@ -97,10 +97,15 @@ func newRoot() *cobra.Command {
 			return fmt.Errorf("--presentation requires --lab")
 		}
 		if exportLab != "" {
-			return internal.ExportWalkthroughCastPolished(exportLab, a, b, exportTheme, internal.WalkthroughPresentation{OperationDelay: exportOperationDelay, SourceLineDelay: exportSourceLineDelay, SourceReveal: exportSourceReveal, Mode: exportPresentation}, exportShowExitCode)
+			var typingOverride *time.Duration
+			if cmd.Flags().Changed("typing-speed") {
+				typingOverride = &exportTypingSpeed
+			}
+			return internal.ExportWalkthroughCastPolished(exportLab, a, b, exportTheme, internal.WalkthroughPresentation{OperationDelay: exportOperationDelay, SourceLineDelay: exportSourceLineDelay, SourceReveal: exportSourceReveal, TypingOverride: typingOverride, Mode: exportPresentation}, exportShowExitCode)
 		}
 		return internal.ExportAsciicast(a, b, exportShowExitCode)
 	}}
+	export.Flags().DurationVar(&exportTypingSpeed, "typing-speed", 50*time.Millisecond, "Override all terminal code-block typing delays (0s disables; --lab only)")
 	export.Flags().StringVar(&exportPresentation, "presentation", "tutorial", "Walkthrough content: tutorial or demo (--lab only)")
 	export.Flags().StringVar(&exportSourceReveal, "source-reveal", "lines", "Source presentation: lines or smooth (GIF-friendly; --lab only)")
 	export.Flags().DurationVar(&exportSourceLineDelay, "source-line-delay", 0, "Reveal source files one line at a time (0 disables; --lab only)")

@@ -474,6 +474,84 @@ agg tutorial-smooth.cast tutorial-smooth.gif
 renderer frame rate.
 
 
+## Planned: timed commands and scripted interactive sessions (CHANGE-017)
+
+> **Status: design proposal — not implemented in the current CLI.** The examples
+> below describe the intended CHANGE-017 behavior. Do not expect `lab-import`
+> to recognize these attributes or interaction blocks until the corresponding
+> implementation and tests are merged.
+
+Some walkthrough commands start a server or enter an interactive prompt and do
+not exit on their own. CHANGE-017 will let a trusted lab run these unattended,
+stop the process safely, preserve the observed output, and continue with the
+next terminal block. The JSONL recording remains the execution evidence;
+exporting a bound lab must never re-execute its commands.
+
+### A. Run a server briefly, then stop it
+
+For a server demonstration, request an intentional interrupt after ten seconds:
+
+````markdown
+```bash {terminal="true" timeout="10s" interrupt="ctrl-c"}
+go run . web -port 8081 webui -api_server_address http://localhost:8081/api api -include_debug_api
+```
+````
+
+**Proposed behavior:** start the command, capture its output for up to ten
+seconds, send Ctrl+C to its process group, wait briefly for shutdown, and
+terminate remaining child processes if necessary. A command that exits
+normally before the deadline keeps its actual result. A successful planned
+interrupt counts as a completed lab step rather than a command failure.
+Unexpected early failure, inability to stop the process, or an unrequested
+safety timeout must still be reported as errors.
+
+### B. Script a conversation with an interactive program
+
+An interactive agent can wait for a prompt, receive input, and wait for the
+next prompt before the lab stops it. The following **proposed** interaction
+syntax is illustrative and may be refined during implementation:
+
+````markdown
+```bash {terminal="true" interactive="true" timeout="30s" interrupt="ctrl-c" expect-exit="0"}
+export MODEL_PROVIDER=ollama
+export MODEL_NAME=gemma4:e4b
+export OPENAI_BASE_URL=http://localhost:11434/v1
+go run .
+```
+
+```interaction
+wait-for: "User ->"
+send: "Hello"
+wait-for: "User ->"
+timeout: 20s
+quit: ctrl-c
+```
+````
+
+**Proposed sequence:**
+
+1. Launch the program with writable stdin and capture live terminal output.
+2. Wait for the first `User ->` prompt; send `Hello` followed by Enter.
+3. Capture the agent's response until the next `User ->` prompt appears.
+4. Interrupt the process intentionally, clean up its child processes, and
+   proceed to the next Markdown command.
+
+The interaction succeeds only if the required prompts are observed within the
+configured timeouts and the requested shutdown completes. If the agent never
+responds or the prompt does not return, the step fails rather than claiming
+success. The `expect-exit="0"` example denotes the intended **logical lab
+result**, not a claim that SIGINT makes the underlying process exit with zero.
+The recording should preserve the actual termination result separately from
+that logical outcome, along with ordered input/output events and timing so a
+future cast can reproduce the exchange faithfully.
+
+**Safety:** `lab-import` executes trusted commands with the caller's OS
+permissions; these examples are not sandboxed. Interactive scripts may send
+sensitive inputs, which could be captured in recordings. Review scripts,
+limit credentials and network access, and use disposable environments when
+appropriate. CHANGE-017 must also define platform-specific interrupt and
+process-tree cleanup behavior before these examples become supported usage.
+
 ## License
 
 TermCast MCP is distributed under the [MIT License](LICENSE). Copyright (c) 2026 cmdlinezero contributors. Preserve the copyright and permission notices when redistributing the software.
